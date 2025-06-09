@@ -1,3 +1,4 @@
 setting,value
 token,BOT TOKEN
 channel_id,CHANNEL ID
+backup_channel_id,BACKUP_CHANNEL_ID (optional)

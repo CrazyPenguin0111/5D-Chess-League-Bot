@@ -1,152 +1,101 @@
-import asyncio, csv, os, sqlite3
+import asyncio, csv, os, sqlite3, shutil
 from datetime import datetime, timedelta
-
-ROLES_CONFIG_FILE = "elo_roles.csv"
-sqliteFile = "elo_bot.db"
+from constants import *
 
 
 def init_db():
-    conn = sqlite3.connect(sqliteFile)
-    c = conn.cursor()
+    missing, extra, wrong_type = check_database_structure(SQLITEFILE)
 
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS players
-                 (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY,
-                     elo
-                     INTEGER
-                     DEFAULT
-                     1380,
-                     wins
-                     INTEGER
-                     DEFAULT
-                     0,
-                     losses
-                     INTEGER
-                     DEFAULT
-                     0,
-                     draws
-                     INTEGER
-                     DEFAULT
-                     0,
-                     signed_up
-                     INTEGER
-                     DEFAULT
-                     0
-                 )"""
-    )
+    reduced_missing, reduced_extra = reduce(missing), reduce(extra)
+    if not os.path.exists("backup"):
+        os.makedirs("backup")
+    if len(missing) + len(extra) > 0:
+        repair_db(reduced_missing, reduced_extra)
+    if len(wrong_type) > 0:
+        print(wrong_type)
+        if input(
+            "wrong prefered column types detected do you want to repair typestructure(yes/NO):"
+        ).lower() in ["y", "yes"]:
+            conn = sqlite3.connect(SQLITEFILE)
+            shutil.copy(SQLITEFILE, f"backup/{datetime.now().timestamp()}_{SQLITEFILE}")
+            c = conn.cursor()
+            for table in list({entry["table"] for entry in wrong_type}):
+                c.execute(f"ALTER TABLE {table} RENAME TO old_{table}")
+                conn.commit()
+                c.execute(build_table_string(table))
+                conn.commit()
+                c.execute(f"INSERT INTO {table} SELECT * from old_{table}")
+                conn.commit()
+                c.execute(f"DROP TABLE old_{table}")
+                conn.commit()
+            conn.close()
 
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS pending_reps
-                 (
-                     id
-                     INTEGER
-                     PRIMARY
-                     KEY
-                     AUTOINCREMENT,
-                     pairing_id
-                     INTEGER,
-                     reporter_id
-                     INTEGER,
-                     result
-                     TEXT,
-                     game_number
-                     INTEGER,
-                     timestamp
-                     DATETIME
-                     DEFAULT
-                     CURRENT_TIMESTAMP
-                 )"""
-    )
 
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS seasons
-                 (
-                     season_number
-                     INTEGER
-                     PRIMARY
-                     KEY,
-                     active
-                     INTEGER
-                     DEFAULT
-                     0
-                 )"""
-    )
+def repair_db(reduced_missing, reduced_extra):
+    conn = sqlite3.connect(SQLITEFILE)
+    shutil.copy(SQLITEFILE, f"backup/{datetime.now().timestamp()}_{SQLITEFILE}")
+    for missed in reduced_missing:
+        c = conn.cursor()
+        table = missed["table"]
+        match missed["type"]:
+            case "table":
+                sqlstring = build_table_string(table)
+                c.execute(sqlstring)
+                conn.commit()
+                print(f"added {table}")
+            case "column":
+                col = missed["column"]
+                sqlstring = f"ALTER TABLE {table} ADD COLUMN {col} {DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table][col]};"
+                c.execute(sqlstring)
+                conn.commit()
+                print(f"added {col} to {table}")
 
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS pairings
-    (
-        id
-        INTEGER
-        PRIMARY
-        KEY
-        AUTOINCREMENT,
-        player1_id
-        INTEGER,
-        player2_id
-        INTEGER,
-        result1
-        REAL
-        DEFAULT
-        NULL,
-        result2
-        REAL
-        DEFAULT
-        NULL,
-        season_number
-        INTEGER,
-        group_name
-        TEXT,
-        FOREIGN
-        KEY
-                 (
-        player1_id
-                 ) REFERENCES players
-                 (
-                     id
-                 ),
-        FOREIGN KEY
-                 (
-                     player2_id
-                 ) REFERENCES players
-                 (
-                     id
-                 )
-        )"""
-    )
-
-    c.execute(
-        """INSERT
-    OR IGNORE INTO seasons (season_number, active) VALUES (1, 0)"""
-    )
-
-    c.execute("PRAGMA table_info(pairings)")
-    columns = [col[1] for col in c.fetchall()]
-
-    if "result1" not in columns:
-        c.execute("ALTER TABLE pairings ADD COLUMN result1 REAL DEFAULT NULL")
-    if "result2" not in columns:
-        c.execute("ALTER TABLE pairings ADD COLUMN result2 REAL DEFAULT NULL")
-    if "season_number" not in columns:
-        c.execute("ALTER TABLE pairings ADD COLUMN season_number INTEGER")
-    if "group_name" not in columns:
-        c.execute("ALTER TABLE pairings ADD COLUMN group_name TEXT")
-
-    if "signed_up" not in [
-        col[1] for col in c.execute("PRAGMA table_info(players)").fetchall()
-    ]:
-        c.execute("ALTER TABLE players ADD COLUMN signed_up INTEGER DEFAULT 0")
-
+    for ext in reduced_extra:
+        c = conn.cursor()
+        table = ext["table"]
+        match ext["type"]:
+            case "table":
+                sqlstring = f"DROP TABLE {table};"
+                c.execute(sqlstring)
+                conn.commit()
+                print(f"dropped {table}")
+            case "column":
+                col = ext["column"]
+                sqlstring = f"ALTER TABLE {table} DROP COLUMN {col};"
+                c.execute(sqlstring)
+                conn.commit
+                print(f"dropped {col} in {table}")
     conn.commit()
     conn.close()
 
 
+def build_table_string(table):
+    sqlstring = f"CREATE TABLE {table} ({DATABASE_STRUCTURE_CREATIONSTRINGMAPPING["Tables"][table]}"
+    items = DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table].items()
+    for coltitle, coltype in items:
+        if coltitle == "foreignkeyconstraint":
+            sqlstring += f", {coltype}"
+            continue
+        sqlstring += f", {coltitle} {coltype}"
+    sqlstring += ");"
+    return sqlstring
+
+
+def reduce(list):
+    skip, reduced_list = [], []
+    for missed in list:
+        if missed["type"] == "table":
+            skip.append(missed["table"])
+        elif missed["table"] in skip:
+            continue
+        reduced_list.append(missed)
+
+    return reduced_list
+
+
 def delete_pending_rep(rep_id):
 
-    conn = sqlite3.connect(sqliteFile)
+    conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
     c.execute("DELETE FROM pending_reps WHERE id=?", (rep_id,))
     conn.commit()
@@ -154,7 +103,7 @@ def delete_pending_rep(rep_id):
 
 
 def update_player_stats(player_id, elo, wins=0, losses=0, draws=0):
-    conn = sqlite3.connect(sqliteFile)
+    conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
     c.execute(
         """UPDATE players
@@ -170,7 +119,7 @@ def update_player_stats(player_id, elo, wins=0, losses=0, draws=0):
 
 
 def get_player_data(player_id):
-    conn = sqlite3.connect(sqliteFile)
+    conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
     c.execute("SELECT * FROM players WHERE id=?", (player_id,))
     player = c.fetchone()
@@ -181,7 +130,7 @@ def get_player_data(player_id):
 async def clean_old_pending_matches():
     while True:
         try:
-            conn = sqlite3.connect(sqliteFile)
+            conn = sqlite3.connect(SQLITEFILE)
             c = conn.cursor()
             cutoff_time = datetime.now() - timedelta(minutes=30)
             cutoff_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -198,7 +147,7 @@ async def clean_old_pending_matches():
 
 async def generate_pairings(ctx, season_number):
     try:
-        conn = sqlite3.connect(sqliteFile)
+        conn = sqlite3.connect(SQLITEFILE)
         c = conn.cursor()
 
         c.execute(
@@ -301,7 +250,7 @@ async def generate_pairings(ctx, season_number):
 
 
 def add_pending_rep(reporter_id, opponent_id, reporter_result):
-    conn = sqlite3.connect(sqliteFile)
+    conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
     c.execute(
         """INSERT INTO pending_reps (reporter_id, opponent_id, reporter_result)
@@ -313,7 +262,7 @@ def add_pending_rep(reporter_id, opponent_id, reporter_result):
 
 
 def get_pending_rep(reporter_id, pairing_id):
-    conn = sqlite3.connect(sqliteFile)
+    conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
     cutoff_time = datetime.now() - timedelta(minutes=30)
     cutoff_str = cutoff_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -332,7 +281,7 @@ def get_pending_rep(reporter_id, pairing_id):
 
 
 def update_season_game(match, game, result):
-    conn = sqlite3.connect(sqliteFile)
+    conn = sqlite3.connect(SQLITEFILE)
     if game not in [1, 2]:
         return "", "wrong game number"
     c = conn.cursor()
@@ -352,11 +301,11 @@ def update_match_history(match, game, result, season, pgn=""):
     print("not yet")
 
 
-def get_specific_pairing(ctx, opponent, c: sqlite3.Cursor = None):
+def get_specific_pairing(ctx, opponent, c=None):
 
     conn = False
     if c == None:
-        conn = sqlite3.connect(sqliteFile)
+        conn = sqlite3.connect(SQLITEFILE)
         c = conn.cursor()
     c.execute(
         """SELECT id, player1_id, player2_id, result1, result2
@@ -375,3 +324,73 @@ def get_specific_pairing(ctx, opponent, c: sqlite3.Cursor = None):
     if conn:
         conn.close()
     return pairing
+
+
+def check_database_structure(db_file):
+
+    try:
+        conn = sqlite3.connect(db_file)
+        c = conn.cursor()
+
+        c.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        actual_tables = {row[0] for row in c.fetchall()}
+        missing = []
+        for table, expected_columns in DATABASE_STRUCTURE.items():
+            if table not in actual_tables:
+                print(f"Missing table: {table}")
+                missing.append({"type": "table", "table": table})
+                for col in expected_columns:
+                    missing.append({"type": "column", "table": table, "column": col})
+                continue
+
+            c.execute(f"PRAGMA table_info({table});")
+            actual_columns = {row[1] for row in c.fetchall()}
+            for col in expected_columns:
+                if col not in actual_columns:
+                    print(f"Missing column in {table}: {col}")
+                    missing.append({"type": "column", "table": table, "column": col})
+        extra, wrong_type = [], []
+        for table in actual_tables:
+            if table == "sqlite_sequence":
+                continue
+            if table not in DATABASE_STRUCTURE:
+                extra.append({"type": "table", "table": table})
+                print(f"Extra table: {table}")
+                c.execute(f"PRAGMA table_info({table});")
+                table_info = c.fetchall()
+                actual_columns = {row[1] for row in table_info}
+                for col in actual_columns:
+                    extra.append({"type": "column", "table": table, "column": col})
+            elif table in DATABASE_STRUCTURE:
+                expected_columns = DATABASE_STRUCTURE[table]
+                c.execute(f"PRAGMA table_info({table});")
+                table_info = c.fetchall()
+                actual_columns = {row[1]: row[2] for row in table_info}
+                for col, type in actual_columns.items():
+                    if col not in expected_columns:
+                        print(f"Extra column in {table}: {col}")
+                        extra.append({"type": "column", "table": table, "column": col})
+                    else:
+                        colmap = DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table]
+
+                        if col not in colmap:
+                            continue
+                        expected_type = DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table][
+                            col
+                        ].split(" ")[0]
+                        if type.upper() != expected_type.upper():
+                            wrong_type.append(
+                                {
+                                    "table": table,
+                                    "column": col,
+                                    "type": type,
+                                    "expected_type": expected_type,
+                                }
+                            )
+
+        return missing, extra, wrong_type
+    except sqlite3.Error as e:
+        print(f"SQLite error: {e}")
+        return False
+    finally:
+        conn.close()
