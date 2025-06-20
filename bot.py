@@ -343,7 +343,11 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
                         (result_value, pairing_id),
                     )
                     conn.commit()
-
+                    update_match_history(
+                        pairing_id,
+                        game_number,
+                        result_value,
+                    )
                     c.execute(
                         """SELECT result1, result2
                                  FROM pairings
