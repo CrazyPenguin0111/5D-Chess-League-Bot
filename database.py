@@ -1,6 +1,7 @@
 import asyncio, csv, os, sqlite3, shutil
 from datetime import datetime, timedelta
 from constants import *
+from constants import SQLITEFILE
 
 
 def init_db():
@@ -494,8 +495,10 @@ def get_group_ranking(season, group):
 def get_latest_season():
     conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
-    c.execute("SELECT season_number FROM seasons ORDER BY season_number DESC LIMIT 1")
-    return c.fetchone()[0]
+    c.execute(
+        "SELECT season_number,active FROM seasons ORDER BY season_number DESC LIMIT 1"
+    )
+    return c.fetchone()
 
 
 def check_database_structure(db_file):
@@ -566,3 +569,18 @@ def check_database_structure(db_file):
         return False
     finally:
         conn.close()
+
+
+def register_new_player(player_id):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO players (id, elo) VALUES (?, ?)", (player_id, INITIAL_ELO))
+    conn.commit()
+    conn.close()
+
+
+def sign_up_player(player_id):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE players SET signed_up=1 WHERE id=?", (player_id,))
+    conn.commit()
