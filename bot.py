@@ -2,7 +2,10 @@ import discord
 from discord.ext import commands
 import sqlite3, math, csv, os, shlex
 from constants import ROLES_CONFIG_FILE, SQLITEFILE
-from cDatabase import *
+from calculation import update_elo
+from database import *
+from database import register_new_player
+from database import sign_up_player
 
 
 def load_config():
@@ -44,24 +47,6 @@ bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
 
 
 init_db()
-
-
-def get_expected_score(a, b):
-    return 1 / (1 + math.pow(10, (b - a) / 400))
-
-
-def update_elo(winner_elo, loser_elo, draw=False):
-    if draw:
-        expected_winner = get_expected_score(winner_elo, loser_elo)
-        expected_loser = get_expected_score(loser_elo, winner_elo)
-        new_winner_elo = winner_elo + 25 * (0.5 - expected_winner)
-        new_loser_elo = loser_elo + 25 * (0.5 - expected_loser)
-        return new_winner_elo, new_loser_elo
-    else:
-        expected = get_expected_score(winner_elo, loser_elo)
-        new_winner_elo = winner_elo + 25 * (1 - expected)
-        new_loser_elo = loser_elo - 25 * (1 - expected)
-        return new_winner_elo, new_loser_elo
 
 
 @bot.command(name="update_roles")
@@ -270,11 +255,7 @@ async def register_player(ctx):
         await ctx.send(f"{ctx.author.mention}, you're already registered!")
         return
 
-    conn = sqlite3.connect(SQLITEFILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO players (id, elo) VALUES (?, ?)", (player_id, INITIAL_ELO))
-    conn.commit()
-    conn.close()
+    register_new_player(player_id)
 
     await ctx.send(
         f"🎉 {ctx.author.mention} has been registered with an initial ELO of {INITIAL_ELO}!"
@@ -595,15 +576,16 @@ async def show_leaderboard(ctx, *args):
             cur = await conn.execute(q_total, member_ids)
         else:
             cur = await conn.execute("SELECT COUNT(*) as cnt FROM players")
-        row = await cur.fetchone(); await cur.close()
+        row = await cur.fetchone()
+        await cur.close()
         total_players = row["cnt"]
 
         # 3b. find your own ELO & rank
         cur = await conn.execute(
-            "SELECT elo, wins, losses, draws FROM players WHERE id=?",
-            (ctx.author.id,)
+            "SELECT elo, wins, losses, draws FROM players WHERE id=?", (ctx.author.id,)
         )
-        you = await cur.fetchone(); await cur.close()
+        you = await cur.fetchone()
+        await cur.close()
 
         user_rank = None
         surrounding = []
@@ -637,18 +619,21 @@ async def show_leaderboard(ctx, *args):
             #  top N + your surrounding 3
             top_q = base_query + where + order + " LIMIT ?"
             cur = await conn.execute(top_q, params + (limit,))
-            top = await cur.fetchall(); await cur.close()
+            top = await cur.fetchall()
+            await cur.close()
 
             off = max(0, user_rank - 2)
             surround_q = base_query + where + order + " LIMIT 3 OFFSET ?"
             cur = await conn.execute(surround_q, params + (off,))
-            surrounding = await cur.fetchall(); await cur.close()
+            surrounding = await cur.fetchall()
+            await cur.close()
             rows = top
         else:
             # user is in top N or not registered → just top N
             top_q = base_query + where + order + " LIMIT ?"
             cur = await conn.execute(top_q, params + (limit,))
-            rows = await cur.fetchall(); await cur.close()
+            rows = await cur.fetchall()
+            await cur.close()
 
     if not rows and not surrounding:
         msg = "❌ No players found"
@@ -667,8 +652,7 @@ async def show_leaderboard(ctx, *args):
     missing = [uid for uid in all_ids if uid not in names]
     if missing:
         fetched = await asyncio.gather(
-            *(ctx.guild.fetch_member(uid) for uid in missing),
-            return_exceptions=True
+            *(ctx.guild.fetch_member(uid) for uid in missing), return_exceptions=True
         )
         # ensure we map results to the original IDs by index
         for idx, res in enumerate(fetched):
@@ -693,8 +677,12 @@ async def show_leaderboard(ctx, *args):
         name = names.get(pid, f"Player {pid}")
 
         games = w + l + d
-        rate = f"{(w/games)*100:.1f}%" if (w+l)>0 else "—"
-        stats = f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})" if games else f"**{elo:.0f} ELO** | No games"
+        rate = f"{(w/games)*100:.1f}%" if (w + l) > 0 else "—"
+        stats = (
+            f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})"
+            if games
+            else f"**{elo:.0f} ELO** | No games"
+        )
 
         embed.add_field(name=f"{idx}. {name}", value=stats, inline=False)
         displayed.add(idx)
@@ -702,7 +690,7 @@ async def show_leaderboard(ctx, *args):
     # Your surrounding (if any)
     if surrounding and you:
         embed.add_field(name="", value="—", inline=False)
-        for offset, r in enumerate(surrounding, start=user_rank-1):
+        for offset, r in enumerate(surrounding, start=user_rank - 1):
             idx = offset
             if idx in displayed:
                 continue
@@ -713,8 +701,12 @@ async def show_leaderboard(ctx, *args):
                 name += f" {role.mention}"
 
             games = w + l + d
-            rate = f"{(w/(w+l))*100:.1f}%" if (w+l)>0 else "—"
-            stats = f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})" if games else f"**{elo:.0f} ELO** | No games"
+            rate = f"{(w/(w+l))*100:.1f}%" if (w + l) > 0 else "—"
+            stats = (
+                f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})"
+                if games
+                else f"**{elo:.0f} ELO** | No games"
+            )
 
             embed.add_field(name=f"{prefix}{idx}. {name}", value=stats, inline=False)
 
@@ -725,6 +717,7 @@ async def show_leaderboard(ctx, *args):
         embed.set_footer(text="Use $register to join the leaderboard")
 
     await ctx.send(embed=embed)
+
 
 @bot.command(name="signup")
 async def signup_player(ctx):
@@ -738,22 +731,13 @@ async def signup_player(ctx):
     if not get_player_data(player_id):
         await ctx.send(f"You need to register first with `$register`!")
         return
-
-    conn = sqlite3.connect(SQLITEFILE)
-    c = conn.cursor()
-
-    c.execute("SELECT active FROM seasons ORDER BY season_number DESC LIMIT 1")
-    season_active = c.fetchone()[0]
+    (_, season_active) = get_latest_season()
 
     if not season_active:
-
-        c.execute("UPDATE players SET signed_up=1 WHERE id=?", (player_id,))
-        conn.commit()
+        sign_up_player(player_id)
         await ctx.send(f"✅ {ctx.author.mention} has signed up for the current season!")
     else:
         await ctx.send("❌ Season is already active")
-
-    conn.close()
 
 
 @bot.command(name="start_season")
@@ -997,7 +981,7 @@ async def show_groupleaderboard(ctx, group="own", season="latest"):
         await ctx.send(error_msg)
         return
     if season == "latest":
-        season = get_latest_season()
+        (season, _) = get_latest_season()
     if group == "own":
         group = find_player_group(ctx.author.id, season)
     if "procrastination" in group.lower() or "lazy" in group.lower():
@@ -1015,8 +999,9 @@ async def show_groupleaderboard(ctx, group="own", season="latest"):
         color = discord.Color.blue()
 
     embed = discord.Embed(
-        title="Rankings", description=f"Ranking of {group} in Season {season}",
-        color = color
+        title="Rankings",
+        description=f"Ranking of {group} in Season {season}",
+        color=color,
     )
     embed_str = ""
     for i, player in enumerate(leaderboard, 1):
@@ -1033,7 +1018,7 @@ async def show_groupleaderboard(ctx, group="own", season="latest"):
         else:
             embed_str += f"{i}. {name}, Score: {player['points']}, {player['sb']}\n"
 
-    embed.add_field(name = "", value = embed_str)
+    embed.add_field(name="", value=embed_str)
     await ctx.send(embed=embed)
 
 
@@ -1070,13 +1055,16 @@ async def show_pairings(ctx, *, args: str = None):
         # 3a. determine active season if none passed
         if season is None:
             cur = await conn.execute("SELECT season_number FROM seasons WHERE active=1")
-            row = await cur.fetchone(); await cur.close()
+            row = await cur.fetchone()
+            await cur.close()
             season = row["season_number"] if row else None
             if season is None:
                 return await ctx.send("❌ No active season!")
 
         # 3b. ensure season exists
-        cur = await conn.execute("SELECT 1 FROM seasons WHERE season_number=?", (season,))
+        cur = await conn.execute(
+            "SELECT 1 FROM seasons WHERE season_number=?", (season,)
+        )
         if not await cur.fetchone():
             await cur.close()
             return await ctx.send(f"❌ Season {season} doesn't exist!")
@@ -1088,11 +1076,14 @@ async def show_pairings(ctx, *, args: str = None):
             player_id = ctx.author.id
             cur = await conn.execute(
                 "SELECT group_name FROM pairings WHERE season_number=? AND (player1_id=? OR player2_id=?) LIMIT 1",
-                (season, player_id, player_id)
+                (season, player_id, player_id),
             )
-            grp = await cur.fetchone(); await cur.close()
+            grp = await cur.fetchone()
+            await cur.close()
             if not grp:
-                return await ctx.send("❌ You are not in any group for the current season!")
+                return await ctx.send(
+                    "❌ You are not in any group for the current season!"
+                )
             group_name = grp["group_name"]
 
         # 3d. validate group_name spelling
@@ -1102,7 +1093,8 @@ async def show_pairings(ctx, *, args: str = None):
                 group_name = "Pro League"
 
             cur = await conn.execute(
-                "SELECT DISTINCT group_name FROM pairings WHERE season_number=?", (season,)
+                "SELECT DISTINCT group_name FROM pairings WHERE season_number=?",
+                (season,),
             )
             valid = [r["group_name"].lower() for r in await cur.fetchall()]
             await cur.close()
@@ -1118,8 +1110,10 @@ async def show_pairings(ctx, *, args: str = None):
             title += f", {group_name}"
 
         # 3e. grab all pairings rows
-        sql = ("SELECT player1_id, player2_id, result1, result2 "
-               "FROM pairings WHERE season_number=?")
+        sql = (
+            "SELECT player1_id, player2_id, result1, result2 "
+            "FROM pairings WHERE season_number=?"
+        )
         params = [season]
         if group_name:
             sql += " AND LOWER(group_name)=LOWER(?)"
@@ -1135,7 +1129,9 @@ async def show_pairings(ctx, *, args: str = None):
         return await ctx.send(f"❌ No pairings found for Season {season}{suffix}!")
 
     # 4️⃣ bulk‑resolve Discord names
-    ids = {row["player1_id"] for row in pairings} | {row["player2_id"] for row in pairings}
+    ids = {row["player1_id"] for row in pairings} | {
+        row["player2_id"] for row in pairings
+    }
     names = {}
     for uid in ids:
         m = ctx.guild.get_member(uid)
@@ -1144,8 +1140,7 @@ async def show_pairings(ctx, *, args: str = None):
     missing = [uid for uid in ids if uid not in names]
     if missing:
         fetched = await asyncio.gather(
-            *(ctx.guild.fetch_member(uid) for uid in missing),
-            return_exceptions=True
+            *(ctx.guild.fetch_member(uid) for uid in missing), return_exceptions=True
         )
         # map each result back to its uid reliably
         for idx, res in enumerate(fetched):
