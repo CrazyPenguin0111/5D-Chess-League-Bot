@@ -184,7 +184,9 @@ async def update_player_roles(ctx):
         c.execute("SELECT id, elo, seasons_missed FROM players WHERE signed_up=0")
 
         n_players = c.fetchall()
-        c.execute("UPDATE players SET seasons_missed = seasons_missed + 1 WHERE signed_up = 0")
+        c.execute(
+            "UPDATE players SET seasons_missed = seasons_missed + 1 WHERE signed_up = 0"
+        )
         conn.close()
 
         for i, (player_id, elo, missed_seasons) in enumerate(n_players):
@@ -200,8 +202,9 @@ async def update_player_roles(ctx):
                     else:
                         elo = 1380
 
-                    c.execute("UPDATE players SET elo = ? WHERE id = ?", (elo, player_id))
-
+                    c.execute(
+                        "UPDATE players SET elo = ? WHERE id = ?", (elo, player_id)
+                    )
 
                 roles_to_remove = []
                 for role_range in role_ranges:
@@ -213,8 +216,6 @@ async def update_player_roles(ctx):
 
                 if roles_to_remove:
                     await member.remove_roles(*roles_to_remove)
-
-
 
                 updated_count += 1
 
@@ -351,9 +352,7 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
                         )
                         return
                     else:
-                        await ctx.send(
-                            "✅ Game Successfully reported!."
-                        )
+                        await ctx.send("✅ Game Successfully reported!.")
 
                     c.execute(
                         f"""UPDATE pairings 
@@ -395,11 +394,7 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
                         else:
                             g2_p2, g2_p1 = update_elo(g1_p2, g1_p1)
 
-                        p1_wins = sum(
-                            1
-                            for r in [game1, game2]
-                            if (r == 1.0)
-                        )
+                        p1_wins = sum(1 for r in [game1, game2] if (r == 1.0))
                         p1_losses = (
                             2 - p1_wins - sum(1 for r in [game1, game2] if r == 0.5)
                         )
@@ -409,12 +404,8 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
                         p2_losses = p1_wins
                         p2_draws = p1_draws
 
-                        update_player_stats(
-                            p1_id, g2_p1, p1_wins, p1_losses, p1_draws
-                        )
-                        update_player_stats(
-                            p2_id, g2_p2, p2_wins, p2_losses, p2_draws
-                        )
+                        update_player_stats(p1_id, g2_p1, p1_wins, p1_losses, p1_draws)
+                        update_player_stats(p2_id, g2_p2, p2_wins, p2_losses, p2_draws)
 
                         await ctx.send(
                             f"✅ Both games confirmed! Updated:\n"
@@ -518,7 +509,7 @@ async def show_stats(ctx, player: discord.Member = None):
     embed.add_field(name="Total Games", value=total_games)
 
     if data[2] + data[3] > 0:
-        win_rate = ((data[2] + 0.5*data[4]) / total_games) * 100
+        win_rate = ((data[2] + 0.5 * data[4]) / total_games) * 100
         embed.add_field(name="Win Rate", value=f"{win_rate:.1f}%")
 
     await ctx.send(embed=embed)
@@ -644,7 +635,7 @@ async def show_leaderboard(ctx, *args):
     for i, (player_id, elo, wins, losses, draws) in enumerate(top_players, 1):
         try:
             member = await ctx.guild.fetch_member(player_id)
-            name = member.display_name
+            name = member.display_name[:20]
             if role and role in member.roles:
                 name = f"{name} {str(role)}"
         except:
@@ -881,6 +872,8 @@ async def show_help(ctx):
             "`$leaderboard [number]` - Show top X players (max 25)\n"
             "`$leaderboard [role name]` - Show leaderboard for a specific role\n"
             "`$leaderboard [number] [role name]` - Combined options"
+            "`$groupranking [group name]` - shows the current rankings of the group you are requesting"
+            "`$groupranking [group name] [season number]` - Shows the Rankings of the Specific Season"
         ),
         inline=False,
     )
@@ -980,6 +973,42 @@ class PairingsPaginator(discord.ui.View):
         for item in self.children:
             item.disabled = True
         await self.message.edit(view=self)
+
+
+@bot.command(name="groupranking")
+async def show_groupleaderboard(ctx, group, season="latest"):
+    allowed, error_msg = check_channel(ctx)
+    if not allowed:
+        await ctx.send(error_msg)
+        return
+
+    if season == "latest":
+        season = get_latest_season()
+    leaderboard = get_group_ranking(season, group)
+    embed = discord.Embed(
+        title="Rankings", description=f"Ranking of {group} in Season {season}"
+    )
+    for i, player in enumerate(leaderboard, 1):
+        id = player["id"]
+        try:
+            member = await ctx.guild.fetch_member(id)
+            name = member.display_name[:20]
+        except discord.NotFound:
+            name = "Player left Server"
+
+        if ctx.author.id == id:
+            embed.add_field(
+                name=f"{i}.",
+                value=f"**Name: {name}**, Score: {player["points"]}, SB: {player["sb"]}",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name=f"{i}.",
+                value=f"Name: {name}, Score: {player["points"]}, SB: {player["sb"]}",
+                inline=False,
+            )
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="pairings")
@@ -1164,6 +1193,7 @@ async def on_message(message):
         allowed, _ = check_channel(message)
         if allowed:
             await bot.process_commands(message)
+
 
 try:
     bot.run(BOT_TOKEN)

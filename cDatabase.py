@@ -235,7 +235,7 @@ async def generate_pairings(ctx, season_number):
 
                 nolook = 0
                 for size in result:
-                    subgroups.append(player_ids[nolook:nolook + size])
+                    subgroups.append(player_ids[nolook : nolook + size])
                     nolook += size
 
             else:
@@ -341,7 +341,7 @@ def update_match_history(match, game, result):
         data = {
             "white": whitePlayer,
             "black": blackPlayer,
-            "result": mapping[round(result,1)],
+            "result": mapping[round(result, 1)],
             "season": season,
             "league": league,
         }
@@ -350,7 +350,7 @@ def update_match_history(match, game, result):
         data = {
             "white": whitePlayer,
             "black": blackPlayer,
-            "result": mapping[round(1-result,1)],
+            "result": mapping[round(1 - result, 1)],
             "season": season,
             "league": league,
         }
@@ -388,6 +388,94 @@ def get_specific_pairing(ctx, opponent, c=None):
     if conn:
         conn.close()
     return pairing
+
+
+def get_group_ranking(season, group):
+    def players_activeseason(p):
+        return f"SELECT DISTINCT(player{p}_id) FROM pairings WHERE group_name = REPLACE(:group, '-B', '-2') or group_name = REPLACE(:group, '-A', '-1') or group_name = REPLACE(:group, '-c', '-3') or group_name = REPLACE(:group, '-D', '-4')"
+
+    def players_historicseason(p):
+        return f"""
+            SELECT DISTINCT({p}player)
+            FROM match_history
+            WHERE REPLACE(UPPER(season), 'SEASON ', '') = :season
+            AND (league = :group OR league = REPLACE(:group, '-A', '-1') OR league = REPLACE(:group, '-B', '-2') OR league = REPLACE(:group, '-C', '-3') OR league = REPLACE(:group, '-D', '-4'))
+        """
+
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("SELECT active FROM seasons WHERE season_number = ?", (season,))
+    if c.fetchone():
+        c.execute(players_activeseason(1), {"group": group})
+        playerlist = {player[0] for player in c.fetchall()}
+        c.execute(players_activeseason(2), {"group": group})
+        playerlist.update({player[0] for player in c.fetchall()})
+    else:
+        sqlObj = {"season": season, "group": group}
+        c.execute(players_historicseason("white"), sqlObj)
+        playerlist = {player[0] for player in c.fetchall()}
+        c.execute(players_historicseason("black"), sqlObj)
+        playerlist.update({player[0] for player in c.fetchall()})
+    leaderboard = []
+    for player in playerlist:
+        c.execute(
+            """SELECT
+                    SUM(
+                        CASE 
+                            WHEN colorwon = 'w' AND whiteplayer = :player THEN 1
+                            WHEN colorwon = 'b' AND blackplayer = :player THEN 1
+                            WHEN colorwon = 'd' AND (blackplayer = :player OR whiteplayer = :player) THEN 0.5
+                            ELSE 0
+                        END
+                    ) AS total_points
+                FROM match_history
+                WHERE REPLACE(UPPER(season), 'SEASON ', '') = :season;
+            """,
+            {"player": player, "season": season},
+        )
+
+        points = c.fetchone()[0]
+        c.execute(
+            """SELECT opponent_id
+                FROM (
+                    SELECT blackplayer AS opponent_id
+                    FROM match_history
+                    WHERE colorwon = 'w'
+                    AND whiteplayer = :player
+                    AND REPLACE(UPPER(season), 'SEASON ', '') = :season
+
+                    UNION ALL
+
+                    SELECT whiteplayer AS opponent_id
+                    FROM match_history
+                    WHERE colorwon = 'b'
+                    AND blackplayer = :player
+                    AND REPLACE(UPPER(season), 'SEASON ', '') = :season
+                )
+            """,
+            {"player": player, "season": season},
+        )
+        if points == None:
+            points = 0
+        wonagainstlist = [opponent[0] for opponent in c.fetchall()]
+        leaderboard.append(
+            {"id": player, "points": points, "wonagainst": wonagainstlist, "sb": 0}
+        )
+    lookup = {player["id"]: player for player in leaderboard}
+    for player in leaderboard:
+        for opponent_id in player["wonagainst"]:
+            opponent = lookup.get(opponent_id)
+            if opponent:
+                player["sb"] += opponent["points"] / 2
+    leaderboard.sort(key=lambda x: (x["points"], x["sb"]), reverse=True)
+    return leaderboard
+
+
+def get_latest_season():
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("SELECT season_number FROM seasons ORDER BY season_number DESC LIMIT 1")
+    return c.fetchone()[0]
 
 
 def check_database_structure(db_file):
