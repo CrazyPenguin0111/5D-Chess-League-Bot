@@ -11,13 +11,14 @@ from database import (
     get_latest_season,
     get_pending_rep,
     get_player_data,
+    get_signedup_players,
     get_specific_pairing,
-    init_db,
     register_new_player,
     sign_up_player,
     update_match_history,
     update_player_stats,
 )
+from database_initialiser import init_db
 from logic import get_role_ranges, update_elo
 
 
@@ -77,13 +78,7 @@ async def update_player_roles(ctx):
 
         role_ranges = get_role_ranges()
 
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
-        c.execute("SELECT id, elo FROM players WHERE signed_up=1")
-
-        players = c.fetchall()
-        c.execute("UPDATE players SET seasons_missed = 0 WHERE signed_up = 1")
-        conn.close()
+        players = get_signedup_players()
 
         if not players:
             await ctx.send("No signed up players found!")
