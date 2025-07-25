@@ -1,8 +1,12 @@
 import asyncio, os, sqlite3, shutil
 from datetime import datetime, timedelta
-from constants import *
-from constants import SQLITEFILE
-from logic import get_role_ranges
+from constants import (
+    DATABASE_STRUCTURE,
+    DATABASE_STRUCTURE_CREATIONSTRINGMAPPING,
+    INITIAL_ELO,
+    SQLITEFILE,
+)
+from logic import get_role_ranges, group_players
 
 
 def init_db():
@@ -170,15 +174,7 @@ async def generate_pairings(ctx, season_number):
 
         role_ranges = get_role_ranges()
 
-        groups = {}
-        for player_id, elo in players:
-
-            for role_range in role_ranges:
-                if role_range["min"] <= elo <= role_range["max"]:
-                    if role_range["name"] not in groups:
-                        groups[role_range["name"]] = []
-                    groups[role_range["name"]].append(player_id)
-                    break
+        groups = group_players(players, role_ranges)
 
         if not groups:
             await ctx.send("❌ Couldn't group players by league roles!")

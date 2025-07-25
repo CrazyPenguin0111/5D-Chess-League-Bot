@@ -1,8 +1,7 @@
 import csv
 import math
-
-from constants import ROLES_CONFIG_FILE
 import os
+from constants import ROLES_CONFIG_FILE
 
 
 def get_expected_score(a, b):
@@ -48,3 +47,15 @@ def get_role_ranges():
 
     role_ranges.sort(key=lambda x: x["min"], reverse=True)
     return role_ranges
+
+
+def group_players(players, role_ranges):
+    groups = {}
+    for player_id, elo in players:
+        for role_range in role_ranges:
+            if role_range["min"] <= elo <= role_range["max"]:
+                if role_range["name"] not in groups:
+                    groups[role_range["name"]] = []
+                groups[role_range["name"]].append(player_id)
+                break
+    return groups

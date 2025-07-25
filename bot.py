@@ -1,11 +1,24 @@
+from datetime import datetime
 import discord
 from discord.ext import commands
 import sqlite3, math, csv, os, shlex
-from constants import ROLES_CONFIG_FILE, SQLITEFILE
-from logic import update_elo
-from database import *
-from database import register_new_player
-from database import sign_up_player
+from constants import INITIAL_ELO, ROLES_CONFIG_FILE, SQLITEFILE
+from database import (
+    clean_old_pending_matches,
+    delete_pending_rep,
+    generate_pairings,
+    get_group_ranking,
+    get_latest_season,
+    get_pending_rep,
+    get_player_data,
+    get_specific_pairing,
+    init_db,
+    register_new_player,
+    sign_up_player,
+    update_match_history,
+    update_player_stats,
+)
+from logic import get_role_ranges, update_elo
 
 
 def load_config():
@@ -62,42 +75,7 @@ async def update_player_roles(ctx):
         if not os.path.exists(ROLES_CONFIG_FILE):
             raise FileNotFoundError(f"'{ROLES_CONFIG_FILE}' not found in bot directory")
 
-        role_ranges = []
-        with open(ROLES_CONFIG_FILE, mode="r") as csvfile:
-            reader = csv.DictReader(csvfile)
-            if (
-                not reader.fieldnames
-                or "role" not in reader.fieldnames
-                or "min elo" not in reader.fieldnames
-                or "max elo" not in reader.fieldnames
-            ):
-                raise ValueError(
-                    "CSV file must have headers: 'role', 'min elo', 'max elo'"
-                )
-
-            for row in reader:
-                if (
-                    not row.get("role")
-                    or not row.get("min elo")
-                    or not row.get("max elo")
-                ):
-                    continue
-
-                try:
-                    role_ranges.append(
-                        {
-                            "name": row["role"].strip(),
-                            "min": int(row["min elo"]),
-                            "max": int(row["max elo"]),
-                        }
-                    )
-                except ValueError:
-                    raise ValueError(f"Invalid ELO values in row: {row}")
-
-        if not role_ranges:
-            raise ValueError("No valid role ranges found in the configuration file")
-
-        role_ranges.sort(key=lambda x: x["min"], reverse=True)
+        role_ranges = get_role_ranges()
 
         conn = sqlite3.connect(SQLITEFILE)
         c = conn.cursor()
