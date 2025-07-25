@@ -396,12 +396,44 @@ def sign_up_player(player_id):
     conn.commit()
 
 
-def get_signedup_players():
+def find_signed_players():
     conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
     c.execute("SELECT id, elo FROM players WHERE signed_up=1")
-
     players = c.fetchall()
-    c.execute("UPDATE players SET seasons_missed = 0 WHERE signed_up = 1")
     conn.close()
     return players
+
+
+def update_missed_seasons():
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE players SET seasons_missed = 0 WHERE signed_up = 1")
+    c.execute(
+        "UPDATE players SET seasons_missed = seasons_missed + 1 WHERE signed_up = 0"
+    )
+    conn.commit()
+    conn.close()
+
+
+def find_unsigned_players():
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("SELECT id, elo, seasons_missed FROM players WHERE signed_up=0")
+    n_players = c.fetchall()
+    conn.close()
+    return n_players
+
+
+def punish_player(player_id, elo, missed_seasons):
+    conn = sqlite3.connect()
+    c = conn.cursor()
+    if missed_seasons > 1:
+        if elo - 1380 > 10:
+            elo -= 10
+        else:
+            elo = 1380
+
+        c.execute("UPDATE players SET elo = ? WHERE id = ?", (elo, player_id))
+        conn.commit()
+    conn.close()

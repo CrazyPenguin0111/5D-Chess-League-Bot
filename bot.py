@@ -6,16 +6,19 @@ from constants import INITIAL_ELO, ROLES_CONFIG_FILE, SQLITEFILE
 from database import (
     clean_old_pending_matches,
     delete_pending_rep,
+    find_unsigned_players,
     generate_pairings,
     get_group_ranking,
     get_latest_season,
     get_pending_rep,
     get_player_data,
-    get_signedup_players,
+    find_signed_players,
     get_specific_pairing,
+    punish_player,
     register_new_player,
     sign_up_player,
     update_match_history,
+    update_missed_seasons,
     update_player_stats,
 )
 from database_initialiser import init_db
@@ -78,7 +81,7 @@ async def update_player_roles(ctx):
 
         role_ranges = get_role_ranges()
 
-        players = get_signedup_players()
+        players = find_signed_players()
 
         if not players:
             await ctx.send("No signed up players found!")
@@ -137,16 +140,8 @@ async def update_player_roles(ctx):
 
         await progress_msg.edit(content=f"Updating Roles ... 100%")
 
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
-        c.execute("SELECT id, elo, seasons_missed FROM players WHERE signed_up=0")
-
-        n_players = c.fetchall()
-        c.execute(
-            "UPDATE players SET seasons_missed = seasons_missed + 1 WHERE signed_up = 0"
-        )
-        conn.close()
-
+        n_players = find_unsigned_players()
+        update_missed_seasons()
         for i, (player_id, elo, missed_seasons) in enumerate(n_players):
             try:
 
@@ -154,15 +149,7 @@ async def update_player_roles(ctx):
                 if not member:
                     continue
 
-                if missed_seasons > 1:
-                    if elo - 1380 > 10:
-                        elo -= 10
-                    else:
-                        elo = 1380
-
-                    c.execute(
-                        "UPDATE players SET elo = ? WHERE id = ?", (elo, player_id)
-                    )
+                punish_player(player_id, elo, missed_seasons)
 
                 roles_to_remove = []
                 for role_range in role_ranges:
