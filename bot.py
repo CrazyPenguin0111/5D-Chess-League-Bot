@@ -4,7 +4,9 @@ from discord.ext import commands
 import sqlite3, math, csv, os, shlex
 from constants import INITIAL_ELO, ROLES_CONFIG_FILE, SQLITEFILE
 from database import (
+    activate_season,
     clean_old_pending_matches,
+    setup_future_season,
     delete_pending_rep,
     find_unsigned_players,
     generate_pairings,
@@ -710,28 +712,18 @@ async def start_season(ctx):
         return
 
     try:
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
 
-        c.execute(
-            "SELECT season_number FROM seasons ORDER BY season_number DESC LIMIT 1"
-        )
-        current_season = c.fetchone()[0]
+        (current_season, active) = get_latest_season()
 
-        c.execute("SELECT active FROM seasons WHERE season_number=?", (current_season,))
-        if c.fetchone()[0]:
+        if active:
             await ctx.send("❌ There's already an active season!")
-            conn.close()
             return
 
         await update_player_roles(ctx)
 
         await generate_pairings(ctx, current_season)
 
-        c.execute(
-            "UPDATE seasons SET active=1 WHERE season_number=?", (current_season,)
-        )
-        conn.commit()
+        activate_season(current_season)
 
         await ctx.send(
             f"✅ Season {current_season} has started! Players can no longer sign up"
@@ -739,8 +731,6 @@ async def start_season(ctx):
 
     except Exception as e:
         await ctx.send(f"❌ Error starting season: {e}")
-    finally:
-        conn.close()
 
 
 @bot.command(name="end_season")
@@ -753,39 +743,21 @@ async def end_season(ctx):
         return
 
     try:
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
 
-        c.execute("SELECT season_number FROM seasons WHERE active=1")
-        result = c.fetchone()
+        (old_season, _) = get_latest_season()
 
-        if not result:
+        if not old_season:
             await ctx.send("❌ No active season to end!")
-            conn.close()
             return
 
-        current_season = result[0]
-
-        c.execute("UPDATE players SET signed_up=0")
-
-        new_season = current_season + 1
-        c.execute(
-            "INSERT INTO seasons (season_number, active) VALUES (?, 0)", (new_season,)
-        )
-
-        c.execute(
-            "UPDATE seasons SET active=0 WHERE season_number=?", (current_season,)
-        )
-        conn.commit()
-
+        new_season = old_season + 1
+        setup_future_season(old_season, new_season)
         await ctx.send(
-            f"✅ Season {current_season} has ended. Season {new_season} is ready to start!"
+            f"✅ Season {old_season} has ended. Season {new_season} is ready to start!"
         )
 
     except Exception as e:
         await ctx.send(f"❌ Error ending season: {e}")
-    finally:
-        conn.close()
 
 
 @bot.command(name="help")

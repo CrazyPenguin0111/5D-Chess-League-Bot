@@ -437,3 +437,24 @@ def punish_player(player_id, elo, missed_seasons):
         c.execute("UPDATE players SET elo = ? WHERE id = ?", (elo, player_id))
         conn.commit()
     conn.close()
+
+
+def setup_future_season(old_season, new_season):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE players SET signed_up=0")
+    c.execute(
+        "INSERT INTO seasons (season_number, active) VALUES (?, 0)", (new_season,)
+    )
+
+    c.execute("UPDATE seasons SET active=0 WHERE season_number=?", (old_season,))
+    conn.commit()
+    conn.close()
+
+
+def activate_season(current_season):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE seasons SET active=1 WHERE season_number=?", (current_season,))
+    conn.commit()
+    conn.close()
