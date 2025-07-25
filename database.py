@@ -4,7 +4,7 @@ from constants import (
     INITIAL_ELO,
     SQLITEFILE,
 )
-from logic import get_role_ranges, group_players
+from logic import calculate_sb, get_role_ranges, group_players
 
 
 def delete_pending_rep(rep_id):
@@ -244,6 +244,7 @@ def update_match_history(match, game, result):
         data,
     )
     conn.commit()
+    conn.close()
 
 
 def find_player_group(player_id, season):
@@ -362,13 +363,8 @@ def get_group_ranking(season, group):
         leaderboard.append(
             {"id": player, "points": points, "wonagainst": wonagainstlist, "sb": 0}
         )
-    lookup = {player["id"]: player for player in leaderboard}
-    for player in leaderboard:
-        for opponent_id in player["wonagainst"]:
-            opponent = lookup.get(opponent_id)
-            if opponent:
-                player["sb"] += opponent["points"] / 2
-    leaderboard.sort(key=lambda x: (x["points"], x["sb"]), reverse=True)
+    conn.close()
+    leaderboard = calculate_sb(leaderboard)
     return leaderboard
 
 
@@ -378,7 +374,9 @@ def get_latest_season():
     c.execute(
         "SELECT season_number,active FROM seasons ORDER BY season_number DESC LIMIT 1"
     )
-    return c.fetchone()
+    latest_season = c.fetchone()
+    conn.close()
+    return latest_season
 
 
 def register_new_player(player_id):
@@ -394,6 +392,7 @@ def sign_up_player(player_id):
     c = conn.cursor()
     c.execute("UPDATE players SET signed_up=1 WHERE id=?", (player_id,))
     conn.commit()
+    conn.close()
 
 
 def find_signed_players():
