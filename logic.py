@@ -59,3 +59,14 @@ def group_players(players, role_ranges):
                 groups[role_range["name"]].append(player_id)
                 break
     return groups
+
+
+def calculate_sb(leaderboard):
+    lookup = {player["id"]: player for player in leaderboard}
+    for player in leaderboard:
+        for opponent_id in player["wonagainst"]:
+            opponent = lookup.get(opponent_id)
+            if opponent:
+                player["sb"] += opponent["points"] / 2
+    leaderboard.sort(key=lambda x: (x["points"], x["sb"]), reverse=True)
+    return leaderboard
