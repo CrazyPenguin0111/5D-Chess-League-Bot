@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 import sqlite3, math, csv, os, shlex
 from constants import ROLES_CONFIG_FILE, SQLITEFILE
-from calculation import update_elo
+from logic import update_elo
 from database import *
 from database import register_new_player
 from database import sign_up_player
@@ -296,7 +296,7 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
 
         if season_active:
 
-            pairing = get_specific_pairing(ctx, opponent, c)
+            pairing = get_specific_pairing(ctx, opponent)
             print(pairing)
             if not pairing:
                 await ctx.send("❌ No valid season pairing found!")

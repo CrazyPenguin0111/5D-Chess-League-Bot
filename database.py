@@ -1,7 +1,8 @@
-import asyncio, csv, os, sqlite3, shutil
+import asyncio, os, sqlite3, shutil
 from datetime import datetime, timedelta
 from constants import *
 from constants import SQLITEFILE
+from logic import get_role_ranges
 
 
 def init_db():
@@ -167,29 +168,7 @@ async def generate_pairings(ctx, season_number):
             await ctx.send("❌ No players have signed up for the season!")
             return False
 
-        role_ranges = []
-        if os.path.exists(ROLES_CONFIG_FILE):
-            with open(ROLES_CONFIG_FILE, mode="r") as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    if (
-                        not row.get("role")
-                        or not row.get("min elo")
-                        or not row.get("max elo")
-                    ):
-                        continue
-                    try:
-                        role_ranges.append(
-                            {
-                                "name": row["role"].strip(),
-                                "min": int(row["min elo"]),
-                                "max": int(row["max elo"]),
-                            }
-                        )
-                    except ValueError:
-                        continue
-
-        role_ranges.sort(key=lambda x: x["min"], reverse=True)
+        role_ranges = get_role_ranges()
 
         groups = {}
         for player_id, elo in players:
@@ -388,10 +367,8 @@ def find_player_group(player_id, season):
 
 def get_specific_pairing(ctx, opponent, c=None):
 
-    conn = False
-    if c == None:
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
     c.execute(
         """SELECT id, player1_id, player2_id, result1, result2
                          FROM pairings
@@ -406,8 +383,7 @@ def get_specific_pairing(ctx, opponent, c=None):
     )
     pairing = c.fetchone()
 
-    if conn:
-        conn.close()
+    conn.close()
     return pairing
 
 
