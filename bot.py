@@ -24,7 +24,7 @@ from database import (
     update_player_stats,
 )
 from database_initialiser import init_db
-from logic import get_role_ranges, update_elo
+from logic import calculate_match_stats, get_role_ranges
 
 
 def load_config():
@@ -347,37 +347,29 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
                         p1_elo = get_player_data(p1_id)[1]
                         p2_elo = get_player_data(p2_id)[1]
 
-                        if game1 == 0.5:
-                            g1_p1, g1_p2 = update_elo(p1_elo, p2_elo, draw=True)
-                        elif game1 == 1.0:
-                            g1_p1, g1_p2 = update_elo(p1_elo, p2_elo)
-                        else:
-                            g1_p2, g1_p1 = update_elo(p2_elo, p1_elo)
-
-                        if game2 == 0.5:
-                            g2_p1, g2_p2 = update_elo(g1_p1, g1_p2, draw=True)
-                        elif game2 == 1.0:
-                            g2_p1, g2_p2 = update_elo(g1_p1, g1_p2)
-                        else:
-                            g2_p2, g2_p1 = update_elo(g1_p2, g1_p1)
-
-                        p1_wins = sum(1 for r in [game1, game2] if (r == 1.0))
-                        p1_losses = (
-                            2 - p1_wins - sum(1 for r in [game1, game2] if r == 0.5)
+                        player1_new_stats, player2_new_stats = calculate_match_stats(
+                            game1, game2, p1_elo, p2_elo
                         )
-                        p1_draws = sum(1 for r in [game1, game2] if r == 0.5)
 
-                        p2_wins = 2 - p1_wins - p1_draws
-                        p2_losses = p1_wins
-                        p2_draws = p1_draws
-
-                        update_player_stats(p1_id, g2_p1, p1_wins, p1_losses, p1_draws)
-                        update_player_stats(p2_id, g2_p2, p2_wins, p2_losses, p2_draws)
+                        update_player_stats(
+                            p1_id,
+                            player1_new_stats["elo"],
+                            player1_new_stats["wins"],
+                            player1_new_stats["losses"],
+                            player1_new_stats["draws"],
+                        )
+                        update_player_stats(
+                            p2_id,
+                            player2_new_stats["elo"],
+                            player2_new_stats["wins"],
+                            player2_new_stats["losses"],
+                            player2_new_stats["draws"],
+                        )
 
                         await ctx.send(
                             f"✅ Both games confirmed! Updated:\n"
-                            f"<@{p1_id}>: {p1_wins}W {p1_losses}L {p1_draws}D | ELO: {p1_elo:.0f}→{g2_p1:.0f}\n"
-                            f"<@{p2_id}>: {p2_wins}W {p2_losses}L {p2_draws}D | ELO: {p2_elo:.0f}→{g2_p2:.0f}"
+                            f"<@{p1_id}>: {player1_new_stats["wins"]}W {player1_new_stats["losses"]}L {player1_new_stats["draws"]}D | ELO: {p1_elo:.0f}→{player1_new_stats["elo"]:.0f}\n"
+                            f"<@{p2_id}>: {player2_new_stats["wins"]}W {player2_new_stats["losses"]}L {player2_new_stats["draws"]}D | ELO: {p2_elo:.0f}→{player2_new_stats["elo"]:.0f}"
                         )
 
                     c.execute(

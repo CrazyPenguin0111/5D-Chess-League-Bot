@@ -70,3 +70,40 @@ def calculate_sb(leaderboard):
                 player["sb"] += opponent["points"] / 2
     leaderboard.sort(key=lambda x: (x["points"], x["sb"]), reverse=True)
     return leaderboard
+
+
+def calculate_match_stats(game1, game2, p1_elo, p2_elo):
+    if game1 == 0.5:
+        g1_p1, g1_p2 = update_elo(p1_elo, p2_elo, draw=True)
+    elif game1 == 1.0:
+        g1_p1, g1_p2 = update_elo(p1_elo, p2_elo)
+    else:
+        g1_p2, g1_p1 = update_elo(p2_elo, p1_elo)
+
+    if game2 == 0.5:
+        g2_p1, g2_p2 = update_elo(g1_p1, g1_p2, draw=True)
+    elif game2 == 1.0:
+        g2_p1, g2_p2 = update_elo(g1_p1, g1_p2)
+    else:
+        g2_p2, g2_p1 = update_elo(g1_p2, g1_p1)
+
+    p1_wins = sum(1 for r in [game1, game2] if (r == 1.0))
+    p1_losses = 2 - p1_wins - sum(1 for r in [game1, game2] if r == 0.5)
+    p1_draws = sum(1 for r in [game1, game2] if r == 0.5)
+
+    p2_wins = 2 - p1_wins - p1_draws
+    p2_losses = p1_wins
+    p2_draws = p1_draws
+    player_1_stats = {
+        "wins": p1_wins,
+        "losses": p1_losses,
+        "draws": p1_draws,
+        "elo": g2_p1,
+    }
+    player_2_stats = {
+        "wins": p2_wins,
+        "losses": p2_losses,
+        "draws": p2_draws,
+        "elo": g2_p2,
+    }
+    return player_1_stats, player_2_stats
