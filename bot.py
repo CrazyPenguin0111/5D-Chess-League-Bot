@@ -404,7 +404,6 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
 
 @bot.command(name="cancel")
 async def cancel_pending_match(ctx, result: str, opponent: discord.Member):
-    """Cancel your last pending match with the specified opponent"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -675,7 +674,6 @@ async def show_leaderboard(ctx, *args):
 
 @bot.command(name="signup")
 async def signup_player(ctx):
-    """Sign up for the current season"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -697,7 +695,6 @@ async def signup_player(ctx):
 @bot.command(name="start_season")
 @commands.has_permissions(manage_roles=True)
 async def start_season(ctx):
-    """Start a new season (Admin only)"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -728,7 +725,6 @@ async def start_season(ctx):
 @bot.command(name="end_season")
 @commands.has_permissions(manage_roles=True)
 async def end_season(ctx):
-    """End the current season (Admin only)"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -754,7 +750,6 @@ async def end_season(ctx):
 
 @bot.command(name="help")
 async def show_help(ctx):
-    """Show all available commands and how to use them"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -948,11 +943,6 @@ async def show_groupleaderboard(ctx, group="own", season="latest"):
 
 @bot.command(name="pairings")
 async def show_pairings(ctx, *, args: str = None):
-
-    import aiosqlite
-    import asyncio
-    import shlex
-
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         return await ctx.send(error_msg)
