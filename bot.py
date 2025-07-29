@@ -11,6 +11,7 @@ from database import (
     clean_old_pending_matches,
     find_pairings_in_db,
     find_player_group,
+    add_and_resolve_report,
     setup_future_season,
     delete_pending_rep,
     find_unsigned_players,
@@ -24,7 +25,6 @@ from database import (
     punish_player,
     register_new_player,
     sign_up_player,
-    update_match_history,
     update_missed_seasons,
     update_player_stats,
 )
@@ -248,163 +248,71 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
         await ctx.send("❌ You can't report a match with yourself!")
         return
 
-    reporter_data = get_player_data(ctx.author.id)
+    author_id = ctx.author.id
+    reporter_data = get_player_data(author_id)
     opponent_data = get_player_data(opponent.id)
     if not reporter_data or not opponent_data:
         await ctx.send("❌ Both players must be registered!")
         return
-
-    conn = sqlite3.connect(SQLITEFILE)
     try:
-        c = conn.cursor()
-        season_active = c.execute(
-            "SELECT active FROM seasons ORDER BY season_number DESC LIMIT 1"
-        ).fetchone()[0]
-
-        if season_active:
-
-            pairing = get_specific_pairing(ctx, opponent)
-            print(pairing)
-            if not pairing:
+        game1, game2, p1_id, p2_id, new_rep = add_and_resolve_report(
+            author_id, opponent.id, game_number, result
+        )
+    except Exception as e:
+        match e.args[0]:
+            case 1:
                 await ctx.send("❌ No valid season pairing found!")
                 return
-
-            pairing_id, p1_id, p2_id, _, _ = pairing
-
-            is_player1 = ctx.author.id == p1_id
-            result_value = (
-                1.0
-                if (result == "w" and is_player1) or (result == "l" and not is_player1)
-                else 0.0
-            )
-            if result == "d":
-                result_value = 0.5
-
-            c.execute(
-                """SELECT reporter_id, result
-                         FROM pending_reps
-                         WHERE pairing_id = ?
-                         AND game_number = ?
-                """,
-                (pairing_id, game_number),
-            )
-            existing_rep = c.fetchone()
-
-            c.execute(
-                """SELECT result1, result2
-                   FROM pairings
-                   WHERE (player1_id = ? AND player2_id = ?)
-                     AND season_number = (SELECT season_number FROM seasons WHERE active = 1)
-                """,
-                (p1_id, p2_id),
-            )
-
-            game1, game2 = c.fetchone()
-            if game_number == 1:
-                if game1 is not None:
-                    await ctx.send(
-                        "❌ Results have already been reported cannot report result again."
-                    )
-                    return
-
-            if game_number == 2:
-                if game2 is not None:
-                    await ctx.send(
-                        "❌ Results have already been reported cannot report result again."
-                    )
-                    return
-
-            if existing_rep:
-
-                if existing_rep[0] == opponent.id:
-                    expected_result = {"w": "l", "l": "w", "d": "d"}[existing_rep[1]]
-                    if result != expected_result:
-                        await ctx.send(
-                            "❌ Results don't match! Please report the opposite result."
-                        )
-                        return
-                    else:
-                        await ctx.send("✅ Game Successfully reported!.")
-
-                    c.execute(
-                        f"""UPDATE pairings 
-                                 SET result{game_number}=?
-                                 WHERE id=?""",
-                        (result_value, pairing_id),
-                    )
-                    conn.commit()
-                    update_match_history(
-                        pairing_id,
-                        game_number,
-                        result_value,
-                    )
-                    c.execute(
-                        """SELECT result1, result2
-                                 FROM pairings
-                                 WHERE (player1_id = ? AND player2_id = ?)
-                                   AND season_number = (SELECT season_number FROM seasons WHERE active = 1)
-                        """,
-                        (p1_id, p2_id),
-                    )
-                    game1, game2 = c.fetchone()
-
-                    if game1 is not None and game2 is not None:
-                        p1_elo = get_player_data(p1_id)[1]
-                        p2_elo = get_player_data(p2_id)[1]
-
-                        player1_new_stats, player2_new_stats = calculate_match_stats(
-                            game1, game2, p1_elo, p2_elo
-                        )
-
-                        update_player_stats(
-                            p1_id,
-                            player1_new_stats["elo"],
-                            player1_new_stats["wins"],
-                            player1_new_stats["losses"],
-                            player1_new_stats["draws"],
-                        )
-                        update_player_stats(
-                            p2_id,
-                            player2_new_stats["elo"],
-                            player2_new_stats["wins"],
-                            player2_new_stats["losses"],
-                            player2_new_stats["draws"],
-                        )
-
-                        await ctx.send(
-                            f"✅ Both games confirmed! Updated:\n"
-                            f"<@{p1_id}>: {player1_new_stats["wins"]}W {player1_new_stats["losses"]}L {player1_new_stats["draws"]}D | ELO: {p1_elo:.0f}→{player1_new_stats["elo"]:.0f}\n"
-                            f"<@{p2_id}>: {player2_new_stats["wins"]}W {player2_new_stats["losses"]}L {player2_new_stats["draws"]}D | ELO: {p2_elo:.0f}→{player2_new_stats["elo"]:.0f}"
-                        )
-
-                    c.execute(
-                        "DELETE FROM pending_reps WHERE pairing_id=? AND game_number=?",
-                        (pairing_id, game_number),
-                    )
-                    conn.commit()
-                else:
-                    await ctx.send(
-                        "❌ Already reported! Waiting for opponent's confirmation."
-                    )
-            else:
-
-                c.execute(
-                    """INSERT INTO pending_reps
-                                 (pairing_id, reporter_id, result, game_number)
-                             VALUES (?, ?, ?, ?)""",
-                    (pairing_id, ctx.author.id, result, game_number),
-                )
-                conn.commit()
+            case 2:
                 await ctx.send(
-                    f"⚠️ Reported game {game_number}! {opponent.mention} confirm with:\n"
-                    f"`$rep {'l' if result == 'w' else 'w' if result == 'l' else 'd'} "
-                    f"@{ctx.author.name} {game_number}`"
+                    "❌ Results have already been reported cannot report result again."
                 )
+                return
+            case 3:
+                await ctx.send(
+                    "❌ Results don't match! Please report the opposite result."
+                )
+                return
+            case 4:
+                await ctx.send(
+                    "❌ Already reported! Waiting for opponent's confirmation."
+                )
+                return
+    if new_rep:
+        await ctx.send(
+            f"⚠️ Reported game {game_number}! {opponent.mention} confirm with:\n"
+            f"`$rep {'l' if result == 'w' else 'w' if result == 'l' else 'd'} "
+            f"@{ctx.author.name} {game_number}`"
+        )
+        return
+    if game1 is not None and game2 is not None:
+        p1_elo = get_player_data(p1_id)[1]
+        p2_elo = get_player_data(p2_id)[1]
 
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        conn.close()
+        player1_new_stats, player2_new_stats = calculate_match_stats(
+            game1, game2, p1_elo, p2_elo
+        )
+
+        update_player_stats(
+            p1_id,
+            player1_new_stats["elo"],
+            player1_new_stats["wins"],
+            player1_new_stats["losses"],
+            player1_new_stats["draws"],
+        )
+        update_player_stats(
+            p2_id,
+            player2_new_stats["elo"],
+            player2_new_stats["wins"],
+            player2_new_stats["losses"],
+            player2_new_stats["draws"],
+        )
+
+        await ctx.send(
+            f"✅ Both games confirmed! Updated:\n"
+            f"<@{p1_id}>: {player1_new_stats["wins"]}W {player1_new_stats["losses"]}L {player1_new_stats["draws"]}D | ELO: {p1_elo:.0f}→{player1_new_stats["elo"]:.0f}\n"
+            f"<@{p2_id}>: {player2_new_stats["wins"]}W {player2_new_stats["losses"]}L {player2_new_stats["draws"]}D | ELO: {p2_elo:.0f}→{player2_new_stats["elo"]:.0f}"
+        )
 
 
 @bot.command(name="cancel")
