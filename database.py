@@ -1,96 +1,12 @@
-import asyncio, csv, os, sqlite3, shutil
+import asyncio, sqlite3
 from datetime import datetime, timedelta
-from constants import *
 
-
-def init_db():
-    missing, extra, wrong_type = check_database_structure(SQLITEFILE)
-
-    reduced_missing, reduced_extra = reduce(missing), reduce(extra)
-    if not os.path.exists("backup"):
-        os.makedirs("backup")
-    if len(missing) + len(extra) > 0:
-        repair_db(reduced_missing, reduced_extra)
-    if len(wrong_type) > 0:
-        print(wrong_type)
-        if input(
-            "wrong prefered column types detected do you want to repair typestructure(yes/NO):"
-        ).lower() in ["y", "yes"]:
-            conn = sqlite3.connect(SQLITEFILE)
-            shutil.copy(SQLITEFILE, f"backup/{datetime.now().timestamp()}_{SQLITEFILE}")
-            c = conn.cursor()
-            for table in list({entry["table"] for entry in wrong_type}):
-                c.execute(f"ALTER TABLE {table} RENAME TO old_{table}")
-                conn.commit()
-                c.execute(build_table_string(table))
-                conn.commit()
-                c.execute(f"INSERT INTO {table} SELECT * from old_{table}")
-                conn.commit()
-                c.execute(f"DROP TABLE old_{table}")
-                conn.commit()
-            conn.close()
-
-
-def repair_db(reduced_missing, reduced_extra):
-    conn = sqlite3.connect(SQLITEFILE)
-    shutil.copy(SQLITEFILE, f"backup/{datetime.now().timestamp()}_{SQLITEFILE}")
-    for missed in reduced_missing:
-        c = conn.cursor()
-        table = missed["table"]
-        match missed["type"]:
-            case "table":
-                sqlstring = build_table_string(table)
-                c.execute(sqlstring)
-                conn.commit()
-                print(f"added {table}")
-            case "column":
-                col = missed["column"]
-                sqlstring = f"ALTER TABLE {table} ADD COLUMN {col} {DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table][col]};"
-                c.execute(sqlstring)
-                conn.commit()
-                print(f"added {col} to {table}")
-
-    for ext in reduced_extra:
-        c = conn.cursor()
-        table = ext["table"]
-        match ext["type"]:
-            case "table":
-                sqlstring = f"DROP TABLE {table};"
-                c.execute(sqlstring)
-                conn.commit()
-                print(f"dropped {table}")
-            case "column":
-                col = ext["column"]
-                sqlstring = f"ALTER TABLE {table} DROP COLUMN {col};"
-                c.execute(sqlstring)
-                conn.commit
-                print(f"dropped {col} in {table}")
-    conn.commit()
-    conn.close()
-
-
-def build_table_string(table):
-    sqlstring = f"CREATE TABLE {table} ({DATABASE_STRUCTURE_CREATIONSTRINGMAPPING['Tables'][table]}"
-    items = DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table].items()
-    for coltitle, coltype in items:
-        if coltitle == "foreignkeyconstraint":
-            sqlstring += f", {coltype}"
-            continue
-        sqlstring += f", {coltitle} {coltype}"
-    sqlstring += ");"
-    return sqlstring
-
-
-def reduce(list):
-    skip, reduced_list = [], []
-    for missed in list:
-        if missed["type"] == "table":
-            skip.append(missed["table"])
-        elif missed["table"] in skip:
-            continue
-        reduced_list.append(missed)
-
-    return reduced_list
+import aiosqlite
+from constants import (
+    INITIAL_ELO,
+    SQLITEFILE,
+)
+from logic import calculate_sb, get_role_ranges, group_players
 
 
 def delete_pending_rep(rep_id):
@@ -166,39 +82,9 @@ async def generate_pairings(ctx, season_number):
             await ctx.send("❌ No players have signed up for the season!")
             return False
 
-        role_ranges = []
-        if os.path.exists(ROLES_CONFIG_FILE):
-            with open(ROLES_CONFIG_FILE, mode="r") as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    if (
-                        not row.get("role")
-                        or not row.get("min elo")
-                        or not row.get("max elo")
-                    ):
-                        continue
-                    try:
-                        role_ranges.append(
-                            {
-                                "name": row["role"].strip(),
-                                "min": int(row["min elo"]),
-                                "max": int(row["max elo"]),
-                            }
-                        )
-                    except ValueError:
-                        continue
+        role_ranges = get_role_ranges()
 
-        role_ranges.sort(key=lambda x: x["min"], reverse=True)
-
-        groups = {}
-        for player_id, elo in players:
-
-            for role_range in role_ranges:
-                if role_range["min"] <= elo <= role_range["max"]:
-                    if role_range["name"] not in groups:
-                        groups[role_range["name"]] = []
-                    groups[role_range["name"]].append(player_id)
-                    break
+        groups = group_players(players, role_ranges)
 
         if not groups:
             await ctx.send("❌ Couldn't group players by league roles!")
@@ -283,6 +169,74 @@ def add_pending_rep(reporter_id, opponent_id, reporter_result):
     conn.close()
 
 
+async def find_pairings_in_db(player_id, season, group_name):
+    async with aiosqlite.connect(SQLITEFILE) as conn:
+        conn.row_factory = aiosqlite.Row
+
+        if season is None:
+            cur = await conn.execute("SELECT season_number FROM seasons WHERE active=1")
+            row = await cur.fetchone()
+            await cur.close()
+            season = row["season_number"] if row else None
+            if season is None:
+                raise Exception(1)
+
+        cur = await conn.execute(
+            "SELECT 1 FROM seasons WHERE season_number=?", (season,)
+        )
+        if not await cur.fetchone():
+            await cur.close()
+            raise Exception(2)
+        await cur.close()
+
+        if group_name is None:
+            cur = await conn.execute(
+                "SELECT group_name FROM pairings WHERE season_number=? AND (player1_id=? OR player2_id=?) LIMIT 1",
+                (season, player_id, player_id),
+            )
+            grp = await cur.fetchone()
+            await cur.close()
+            if not grp:
+                raise Exception(3)
+            group_name = grp["group_name"]
+
+        if group_name:
+
+            if "procrastination" in group_name.lower() or "lazy" in group_name.lower():
+                group_name = "Pro League"
+
+            cur = await conn.execute(
+                "SELECT DISTINCT group_name FROM pairings WHERE season_number=?",
+                (season,),
+            )
+            valid = [r["group_name"].lower() for r in await cur.fetchall()]
+            await cur.close()
+            if group_name.lower() not in valid:
+                sugg = [g for g in valid if group_name.lower() in g]
+                msg = f"❌ Group '{group_name}' not found in season {season}!"
+                if sugg:
+                    msg += f"\nDid you mean: {', '.join(sugg[:3])}?"
+                raise Exception(msg)
+
+        if group_name:
+            title += f", {group_name}"
+
+        sql = (
+            "SELECT player1_id, player2_id, result1, result2 "
+            "FROM pairings WHERE season_number=?"
+        )
+        params = [season]
+        if group_name:
+            sql += " AND LOWER(group_name)=LOWER(?)"
+            params.append(group_name)
+        sql += " ORDER BY id"
+
+        cur = await conn.execute(sql, params)
+        pairings = await cur.fetchall()
+        await cur.close()
+        return pairings, season
+
+
 def get_pending_rep(reporter_id, pairing_id):
     conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
@@ -360,6 +314,7 @@ def update_match_history(match, game, result):
         data,
     )
     conn.commit()
+    conn.close()
 
 
 def find_player_group(player_id, season):
@@ -385,12 +340,10 @@ def find_player_group(player_id, season):
     return group[0]
 
 
-def get_specific_pairing(ctx, opponent, c=None):
+def get_specific_pairing(player_id: int, oppoent_id: int, c=None):
 
-    conn = False
-    if c == None:
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
     c.execute(
         """SELECT id, player1_id, player2_id, result1, result2
                          FROM pairings
@@ -399,14 +352,13 @@ def get_specific_pairing(ctx, opponent, c=None):
                             AND season_number = (SELECT season_number FROM seasons WHERE active = 1)
                             """,
         {
-            "playerA": ctx.author.id,
-            "playerB": opponent.id,
+            "playerA": player_id,
+            "playerB": oppoent_id,
         },
     )
     pairing = c.fetchone()
 
-    if conn:
-        conn.close()
+    conn.close()
     return pairing
 
 
@@ -481,88 +433,251 @@ def get_group_ranking(season, group):
         leaderboard.append(
             {"id": player, "points": points, "wonagainst": wonagainstlist, "sb": 0}
         )
-    lookup = {player["id"]: player for player in leaderboard}
-    for player in leaderboard:
-        for opponent_id in player["wonagainst"]:
-            opponent = lookup.get(opponent_id)
-            if opponent:
-                player["sb"] += opponent["points"] / 2
-    leaderboard.sort(key=lambda x: (x["points"], x["sb"]), reverse=True)
+    conn.close()
+    leaderboard = calculate_sb(leaderboard)
     return leaderboard
 
 
 def get_latest_season():
     conn = sqlite3.connect(SQLITEFILE)
     c = conn.cursor()
-    c.execute("SELECT season_number FROM seasons ORDER BY season_number DESC LIMIT 1")
-    return c.fetchone()[0]
+    c.execute(
+        "SELECT season_number,active FROM seasons ORDER BY season_number DESC LIMIT 1"
+    )
+    latest_season = c.fetchone()
+    conn.close()
+    return latest_season
 
 
-def check_database_structure(db_file):
+def register_new_player(player_id):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO players (id, elo) VALUES (?, ?)", (player_id, INITIAL_ELO))
+    conn.commit()
+    conn.close()
 
-    try:
-        conn = sqlite3.connect(db_file)
-        c = conn.cursor()
 
-        c.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        actual_tables = {row[0] for row in c.fetchall()}
-        missing = []
-        for table, expected_columns in DATABASE_STRUCTURE.items():
-            if table not in actual_tables:
-                print(f"Missing table: {table}")
-                missing.append({"type": "table", "table": table})
-                for col in expected_columns:
-                    missing.append({"type": "column", "table": table, "column": col})
-                continue
+def sign_up_player(player_id):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE players SET signed_up=1 WHERE id=?", (player_id,))
+    conn.commit()
+    conn.close()
 
-            c.execute(f"PRAGMA table_info({table});")
-            actual_columns = {row[1] for row in c.fetchall()}
-            for col in expected_columns:
-                if col not in actual_columns:
-                    print(f"Missing column in {table}: {col}")
-                    missing.append({"type": "column", "table": table, "column": col})
-        extra, wrong_type = [], []
-        for table in actual_tables:
-            if table == "sqlite_sequence":
-                continue
-            if table not in DATABASE_STRUCTURE:
-                extra.append({"type": "table", "table": table})
-                print(f"Extra table: {table}")
-                c.execute(f"PRAGMA table_info({table});")
-                table_info = c.fetchall()
-                actual_columns = {row[1] for row in table_info}
-                for col in actual_columns:
-                    extra.append({"type": "column", "table": table, "column": col})
-            elif table in DATABASE_STRUCTURE:
-                expected_columns = DATABASE_STRUCTURE[table]
-                c.execute(f"PRAGMA table_info({table});")
-                table_info = c.fetchall()
-                actual_columns = {row[1]: row[2] for row in table_info}
-                for col, type in actual_columns.items():
-                    if col not in expected_columns:
-                        print(f"Extra column in {table}: {col}")
-                        extra.append({"type": "column", "table": table, "column": col})
-                    else:
-                        colmap = DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table]
 
-                        if col not in colmap:
-                            continue
-                        expected_type = DATABASE_STRUCTURE_CREATIONSTRINGMAPPING[table][
-                            col
-                        ].split(" ")[0]
-                        if type.upper() != expected_type.upper():
-                            wrong_type.append(
-                                {
-                                    "table": table,
-                                    "column": col,
-                                    "type": type,
-                                    "expected_type": expected_type,
-                                }
-                            )
+def find_signed_players():
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("SELECT id, elo FROM players WHERE signed_up=1")
+    players = c.fetchall()
+    conn.close()
+    return players
 
-        return missing, extra, wrong_type
-    except sqlite3.Error as e:
-        print(f"SQLite error: {e}")
-        return False
-    finally:
-        conn.close()
+
+def update_missed_seasons():
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE players SET seasons_missed = 0 WHERE signed_up = 1")
+    c.execute(
+        "UPDATE players SET seasons_missed = seasons_missed + 1 WHERE signed_up = 0"
+    )
+    conn.commit()
+    conn.close()
+
+
+def find_unsigned_players():
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("SELECT id, elo, seasons_missed FROM players WHERE signed_up=0")
+    n_players = c.fetchall()
+    conn.close()
+    return n_players
+
+
+def punish_player(player_id, elo, missed_seasons):
+    conn = sqlite3.connect()
+    c = conn.cursor()
+    if missed_seasons > 1:
+        if elo - 1380 > 10:
+            elo -= 10
+        else:
+            elo = 1380
+
+        c.execute("UPDATE players SET elo = ? WHERE id = ?", (elo, player_id))
+        conn.commit()
+    conn.close()
+
+
+def setup_future_season(old_season, new_season):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE players SET signed_up=0")
+    c.execute(
+        "INSERT INTO seasons (season_number, active) VALUES (?, 0)", (new_season,)
+    )
+
+    c.execute("UPDATE seasons SET active=0 WHERE season_number=?", (old_season,))
+    conn.commit()
+    conn.close()
+
+
+def activate_season(current_season):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    c.execute("UPDATE seasons SET active=1 WHERE season_number=?", (current_season,))
+    conn.commit()
+    conn.close()
+
+
+async def bundle_leaderboard(player_id, limit, member_ids):
+    async with aiosqlite.connect(SQLITEFILE) as conn:
+        conn.row_factory = aiosqlite.Row
+
+        # 3a. total players (for “of X” in footer)
+        if member_ids:
+            q_total = f"SELECT COUNT(*) as cnt FROM players WHERE id IN ({','.join('?'*len(member_ids))})"
+            cur = await conn.execute(q_total, member_ids)
+        else:
+            cur = await conn.execute("SELECT COUNT(*) as cnt FROM players")
+        row = await cur.fetchone()
+        await cur.close()
+        total_players = row["cnt"]
+
+        # 3b. find your own ELO & rank
+        cur = await conn.execute(
+            "SELECT elo, wins, losses, draws FROM players WHERE id=?", (player_id,)
+        )
+        you = await cur.fetchone()
+        await cur.close()
+
+        user_rank = None
+        surrounding = []
+        if you:
+            your_elo = you["elo"]
+            # count how many have strictly higher ELO
+            if member_ids:
+                q_rank = (
+                    f"SELECT COUNT(*) as cnt FROM players WHERE elo>? "
+                    f"AND id IN ({','.join('?'*len(member_ids))})"
+                )
+                params = (your_elo, *member_ids)
+            else:
+                q_rank = "SELECT COUNT(*) as cnt FROM players WHERE elo>?"
+                params = (your_elo,)
+            cur = await conn.execute(q_rank, params)
+            user_rank = (await cur.fetchone())["cnt"] + 1
+            await cur.close()
+
+        # 3c. fetch leaderboard rows
+        rows = []
+        base_query = "SELECT id, elo, wins, losses, draws FROM players"
+        where = ""
+        params = ()
+        if member_ids:
+            where = f" WHERE id IN ({','.join('?'*len(member_ids))})"
+            params = tuple(member_ids)
+        order = " ORDER BY elo DESC"
+
+        if you and user_rank and user_rank > limit:
+            #  top N + your surrounding 3
+            top_q = base_query + where + order + " LIMIT ?"
+            cur = await conn.execute(top_q, params + (limit,))
+            top = await cur.fetchall()
+            await cur.close()
+
+            off = max(0, user_rank - 2)
+            surround_q = base_query + where + order + " LIMIT 3 OFFSET ?"
+            cur = await conn.execute(surround_q, params + (off,))
+            surrounding = await cur.fetchall()
+            await cur.close()
+            rows = top
+        else:
+            # user is in top N or not registered → just top N
+            top_q = base_query + where + order + " LIMIT ?"
+            cur = await conn.execute(top_q, params + (limit,))
+            rows = await cur.fetchall()
+            await cur.close()
+    return total_players, you, user_rank, surrounding, rows
+
+
+def add_and_resolve_report(author_id, opponent_id, game_number, result):
+    conn = sqlite3.connect(SQLITEFILE)
+    c = conn.cursor()
+    new_rep = False
+
+    def find_gameresults_in_db(inner_p1_id, inner_p2_id):
+        c.execute(
+            """SELECT result1, result2 FROM pairings WHERE (player1_id = ? AND player2_id = ?) AND season_number = (SELECT season_number FROM seasons WHERE active = 1)""",
+            (inner_p1_id, inner_p2_id),
+        )
+        return c.fetchone()
+
+    season_active = c.execute(
+        "SELECT active FROM seasons ORDER BY season_number DESC LIMIT 1"
+    ).fetchone()[0]
+    if season_active:
+        pairing = get_specific_pairing(author_id, opponent_id)
+        if not pairing:
+            raise Exception(1)
+        pairing_id, p1_id, p2_id, _, _ = pairing
+        is_player1 = author_id == p1_id
+        result_value = (
+            1.0
+            if (result == "w" and is_player1) or (result == "l" and not is_player1)
+            else 0.0
+        )
+        if result == "d":
+            result_value = 0.5
+
+        c.execute(
+            """SELECT reporter_id, result
+                        FROM pending_reps
+                        WHERE pairing_id = ?
+                        AND game_number = ?
+            """,
+            (pairing_id, game_number),
+        )
+        existing_rep = c.fetchone()
+
+        game1, game2 = find_gameresults_in_db(p1_id, p2_id)
+        if game_number == 1:
+            if game1 is not None:
+                raise Exception(2)
+        if game_number == 2:
+            if game2 is not None:
+                raise Exception(2)
+        if existing_rep:
+            if existing_rep[0] == opponent_id:
+                expected_result = {"w": "l", "l": "w", "d": "d"}[existing_rep[1]]
+                if result != expected_result:
+                    raise Exception(3)
+
+                c.execute(
+                    f"""UPDATE pairings 
+                                 SET result{game_number}=?
+                                 WHERE id=?""",
+                    (result_value, pairing_id),
+                )
+                conn.commit()
+                update_match_history(
+                    pairing_id,
+                    game_number,
+                    result_value,
+                )
+                c.execute("DELETE FROM pending_reps WHERE pairing_id=?", (pairing_id,))
+                conn.commit()
+            else:
+                raise Exception(4)
+        else:
+            c.execute(
+                """INSERT INTO pending_reps
+                                (pairing_id, reporter_id, result, game_number)
+                            VALUES (?, ?, ?, ?)""",
+                (pairing_id, author_id, result, game_number),
+            )
+            conn.commit()
+            new_rep = True
+
+    game1, game2 = find_gameresults_in_db(p1_id, p2_id)
+    conn.close()
+    return game1, game2, p1_id, p2_id, new_rep
