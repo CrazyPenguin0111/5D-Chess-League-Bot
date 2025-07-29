@@ -1,5 +1,7 @@
 import asyncio, sqlite3
 from datetime import datetime, timedelta
+
+import aiosqlite
 from constants import (
     INITIAL_ELO,
     SQLITEFILE,
@@ -165,6 +167,74 @@ def add_pending_rep(reporter_id, opponent_id, reporter_result):
     )
     conn.commit()
     conn.close()
+
+
+async def find_pairings_in_db(player_id, season, group_name):
+    async with aiosqlite.connect(SQLITEFILE) as conn:
+        conn.row_factory = aiosqlite.Row
+
+        if season is None:
+            cur = await conn.execute("SELECT season_number FROM seasons WHERE active=1")
+            row = await cur.fetchone()
+            await cur.close()
+            season = row["season_number"] if row else None
+            if season is None:
+                raise Exception(1)
+
+        cur = await conn.execute(
+            "SELECT 1 FROM seasons WHERE season_number=?", (season,)
+        )
+        if not await cur.fetchone():
+            await cur.close()
+            raise Exception(2)
+        await cur.close()
+
+        if group_name is None:
+            cur = await conn.execute(
+                "SELECT group_name FROM pairings WHERE season_number=? AND (player1_id=? OR player2_id=?) LIMIT 1",
+                (season, player_id, player_id),
+            )
+            grp = await cur.fetchone()
+            await cur.close()
+            if not grp:
+                raise Exception(3)
+            group_name = grp["group_name"]
+
+        if group_name:
+
+            if "procrastination" in group_name.lower() or "lazy" in group_name.lower():
+                group_name = "Pro League"
+
+            cur = await conn.execute(
+                "SELECT DISTINCT group_name FROM pairings WHERE season_number=?",
+                (season,),
+            )
+            valid = [r["group_name"].lower() for r in await cur.fetchall()]
+            await cur.close()
+            if group_name.lower() not in valid:
+                sugg = [g for g in valid if group_name.lower() in g]
+                msg = f"❌ Group '{group_name}' not found in season {season}!"
+                if sugg:
+                    msg += f"\nDid you mean: {', '.join(sugg[:3])}?"
+                raise Exception(msg)
+
+        if group_name:
+            title += f", {group_name}"
+
+        sql = (
+            "SELECT player1_id, player2_id, result1, result2 "
+            "FROM pairings WHERE season_number=?"
+        )
+        params = [season]
+        if group_name:
+            sql += " AND LOWER(group_name)=LOWER(?)"
+            params.append(group_name)
+        sql += " ORDER BY id"
+
+        cur = await conn.execute(sql, params)
+        pairings = await cur.fetchall()
+        await cur.close()
+        return pairings, season
 
 
 def get_pending_rep(reporter_id, pairing_id):
@@ -457,3 +527,74 @@ def activate_season(current_season):
     c.execute("UPDATE seasons SET active=1 WHERE season_number=?", (current_season,))
     conn.commit()
     conn.close()
+
+
+async def bundle_leaderboard(player_id, limit, member_ids):
+    async with aiosqlite.connect(SQLITEFILE) as conn:
+        conn.row_factory = aiosqlite.Row
+
+        # 3a. total players (for “of X” in footer)
+        if member_ids:
+            q_total = f"SELECT COUNT(*) as cnt FROM players WHERE id IN ({','.join('?'*len(member_ids))})"
+            cur = await conn.execute(q_total, member_ids)
+        else:
+            cur = await conn.execute("SELECT COUNT(*) as cnt FROM players")
+        row = await cur.fetchone()
+        await cur.close()
+        total_players = row["cnt"]
+
+        # 3b. find your own ELO & rank
+        cur = await conn.execute(
+            "SELECT elo, wins, losses, draws FROM players WHERE id=?", (player_id,)
+        )
+        you = await cur.fetchone()
+        await cur.close()
+
+        user_rank = None
+        surrounding = []
+        if you:
+            your_elo = you["elo"]
+            # count how many have strictly higher ELO
+            if member_ids:
+                q_rank = (
+                    f"SELECT COUNT(*) as cnt FROM players WHERE elo>? "
+                    f"AND id IN ({','.join('?'*len(member_ids))})"
+                )
+                params = (your_elo, *member_ids)
+            else:
+                q_rank = "SELECT COUNT(*) as cnt FROM players WHERE elo>?"
+                params = (your_elo,)
+            cur = await conn.execute(q_rank, params)
+            user_rank = (await cur.fetchone())["cnt"] + 1
+            await cur.close()
+
+        # 3c. fetch leaderboard rows
+        rows = []
+        base_query = "SELECT id, elo, wins, losses, draws FROM players"
+        where = ""
+        params = ()
+        if member_ids:
+            where = f" WHERE id IN ({','.join('?'*len(member_ids))})"
+            params = tuple(member_ids)
+        order = " ORDER BY elo DESC"
+
+        if you and user_rank and user_rank > limit:
+            #  top N + your surrounding 3
+            top_q = base_query + where + order + " LIMIT ?"
+            cur = await conn.execute(top_q, params + (limit,))
+            top = await cur.fetchall()
+            await cur.close()
+
+            off = max(0, user_rank - 2)
+            surround_q = base_query + where + order + " LIMIT 3 OFFSET ?"
+            cur = await conn.execute(surround_q, params + (off,))
+            surrounding = await cur.fetchall()
+            await cur.close()
+            rows = top
+        else:
+            # user is in top N or not registered → just top N
+            top_q = base_query + where + order + " LIMIT ?"
+            cur = await conn.execute(top_q, params + (limit,))
+            rows = await cur.fetchall()
+            await cur.close()
+    return total_players, you, user_rank, surrounding, rows

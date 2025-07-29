@@ -1,11 +1,16 @@
+import asyncio
 from datetime import datetime
+import sqlite3
 import discord
 from discord.ext import commands
-import sqlite3, math, csv, os, shlex
+import math, csv, os, shlex
 from constants import INITIAL_ELO, ROLES_CONFIG_FILE, SQLITEFILE
 from database import (
     activate_season,
+    bundle_leaderboard,
     clean_old_pending_matches,
+    find_pairings_in_db,
+    find_player_group,
     setup_future_season,
     delete_pending_rep,
     find_unsigned_players,
@@ -489,9 +494,6 @@ async def backup_db(ctx):
 
 @bot.command(name="leaderboard")
 async def show_leaderboard(ctx, *args):
-    """Show the top N players, optionally filtered by role, with your own rank highlighted."""
-
-    import aiosqlite
 
     allowed, error_msg = check_channel(ctx)
     if not allowed:
@@ -506,7 +508,6 @@ async def show_leaderboard(ctx, *args):
         else:
             role_name = (role_name + " " + arg).strip() if role_name else arg
 
-    # 2️⃣ resolve role & its member IDs
     role = None
     member_ids = None
     if role_name:
@@ -519,74 +520,9 @@ async def show_leaderboard(ctx, *args):
         if not member_ids:
             return await ctx.send(f"❌ No players have the '{role.name}' role!")
 
-    # 3️⃣ async DB: total count & your rank
-    async with aiosqlite.connect(SQLITEFILE) as conn:
-        conn.row_factory = aiosqlite.Row
-
-        # 3a. total players (for “of X” in footer)
-        if member_ids:
-            q_total = f"SELECT COUNT(*) as cnt FROM players WHERE id IN ({','.join('?'*len(member_ids))})"
-            cur = await conn.execute(q_total, member_ids)
-        else:
-            cur = await conn.execute("SELECT COUNT(*) as cnt FROM players")
-        row = await cur.fetchone()
-        await cur.close()
-        total_players = row["cnt"]
-
-        # 3b. find your own ELO & rank
-        cur = await conn.execute(
-            "SELECT elo, wins, losses, draws FROM players WHERE id=?", (ctx.author.id,)
-        )
-        you = await cur.fetchone()
-        await cur.close()
-
-        user_rank = None
-        surrounding = []
-        if you:
-            your_elo = you["elo"]
-            # count how many have strictly higher ELO
-            if member_ids:
-                q_rank = (
-                    f"SELECT COUNT(*) as cnt FROM players WHERE elo>? "
-                    f"AND id IN ({','.join('?'*len(member_ids))})"
-                )
-                params = (your_elo, *member_ids)
-            else:
-                q_rank = "SELECT COUNT(*) as cnt FROM players WHERE elo>?"
-                params = (your_elo,)
-            cur = await conn.execute(q_rank, params)
-            user_rank = (await cur.fetchone())["cnt"] + 1
-            await cur.close()
-
-        # 3c. fetch leaderboard rows
-        rows = []
-        base_query = "SELECT id, elo, wins, losses, draws FROM players"
-        where = ""
-        params = ()
-        if member_ids:
-            where = f" WHERE id IN ({','.join('?'*len(member_ids))})"
-            params = tuple(member_ids)
-        order = " ORDER BY elo DESC"
-
-        if you and user_rank and user_rank > limit:
-            #  top N + your surrounding 3
-            top_q = base_query + where + order + " LIMIT ?"
-            cur = await conn.execute(top_q, params + (limit,))
-            top = await cur.fetchall()
-            await cur.close()
-
-            off = max(0, user_rank - 2)
-            surround_q = base_query + where + order + " LIMIT 3 OFFSET ?"
-            cur = await conn.execute(surround_q, params + (off,))
-            surrounding = await cur.fetchall()
-            await cur.close()
-            rows = top
-        else:
-            # user is in top N or not registered → just top N
-            top_q = base_query + where + order + " LIMIT ?"
-            cur = await conn.execute(top_q, params + (limit,))
-            rows = await cur.fetchall()
-            await cur.close()
+    total_players, you, user_rank, surrounding, rows = await bundle_leaderboard(
+        ctx.author.id, limit, member_ids
+    )
 
     if not rows and not surrounding:
         msg = "❌ No players found"
@@ -963,86 +899,28 @@ async def show_pairings(ctx, *, args: str = None):
         season = None
         group_name = None
 
-    async with aiosqlite.connect(SQLITEFILE) as conn:
-        conn.row_factory = aiosqlite.Row
-
-        # 3a. determine active season if none passed
-        if season is None:
-            cur = await conn.execute("SELECT season_number FROM seasons WHERE active=1")
-            row = await cur.fetchone()
-            await cur.close()
-            season = row["season_number"] if row else None
-            if season is None:
-                return await ctx.send("❌ No active season!")
-
-        # 3b. ensure season exists
-        cur = await conn.execute(
-            "SELECT 1 FROM seasons WHERE season_number=?", (season,)
-        )
-        if not await cur.fetchone():
-            await cur.close()
-            return await ctx.send(f"❌ Season {season} doesn't exist!")
-        await cur.close()
-
-        # 3c. find user’s group if none passed
-        if group_name is None:
-
-            player_id = ctx.author.id
-            cur = await conn.execute(
-                "SELECT group_name FROM pairings WHERE season_number=? AND (player1_id=? OR player2_id=?) LIMIT 1",
-                (season, player_id, player_id),
-            )
-            grp = await cur.fetchone()
-            await cur.close()
-            if not grp:
-                return await ctx.send(
-                    "❌ You are not in any group for the current season!"
-                )
-            group_name = grp["group_name"]
-
-        # 3d. validate group_name spelling
-        if group_name:
-
-            if "procrastination" in group_name.lower() or "lazy" in group_name.lower():
-                group_name = "Pro League"
-
-            cur = await conn.execute(
-                "SELECT DISTINCT group_name FROM pairings WHERE season_number=?",
-                (season,),
-            )
-            valid = [r["group_name"].lower() for r in await cur.fetchall()]
-            await cur.close()
-            if group_name.lower() not in valid:
-                sugg = [g for g in valid if group_name.lower() in g]
-                msg = f"❌ Group '{group_name}' not found in season {season}!"
-                if sugg:
-                    msg += f"\nDid you mean: {', '.join(sugg[:3])}?"
-                return await ctx.send(msg)
-
-        title = f"Pairings - Season {season}"
-        if group_name:
-            title += f", {group_name}"
-
-        # 3e. grab all pairings rows
-        sql = (
-            "SELECT player1_id, player2_id, result1, result2 "
-            "FROM pairings WHERE season_number=?"
-        )
-        params = [season]
-        if group_name:
-            sql += " AND LOWER(group_name)=LOWER(?)"
-            params.append(group_name)
-        sql += " ORDER BY id"
-
-        cur = await conn.execute(sql, params)
-        pairings = await cur.fetchall()
-        await cur.close()
-
+    try:
+        pairings, season = find_pairings_in_db(ctx.player.id, season, group_name)
+    except Exception as e:
+        (errorcode,) = e.args
+        match errorcode:
+            case 1:
+                await ctx.send("❌ No active season!")
+                return
+            case 2:
+                await ctx.send(f"❌ Season {season} doesn't exist!")
+                return
+            case 3:
+                await ctx.send("❌ You are not in any group for the current season!")
+                return
+            case _:
+                await ctx.send(errorcode)
+                return
     if not pairings:
         suffix = f", Group {group_name}" if group_name else ""
-        return await ctx.send(f"❌ No pairings found for Season {season}{suffix}!")
+        await ctx.send(f"❌ No pairings found for Season {season}{suffix}!")
+        return
 
-    # 4️⃣ bulk‑resolve Discord names
     ids = {row["player1_id"] for row in pairings} | {
         row["player2_id"] for row in pairings
     }
@@ -1065,7 +943,6 @@ async def show_pairings(ctx, *, args: str = None):
                 # fallback on error: still provide a display name for this uid
                 names[uid] = f"Player {uid}"
 
-    # 5️⃣ build paged embeds
     MAX_CHARS = 3800
     pages, desc = [], ""
     for i, r in enumerate(pairings, start=1):
@@ -1103,13 +980,12 @@ async def show_pairings(ctx, *, args: str = None):
             desc += entry
     if desc:
         pages.append(desc)
-
+    title = f"Pairings - Season {season}"
     embeds = [
         discord.Embed(title=f"{title} — Page {idx+1}", description=page, color=0x00FF00)
         for idx, page in enumerate(pages)
     ]
 
-    # 6️⃣ send
     if len(embeds) == 1:
         await ctx.send(embed=embeds[0])
     else:
