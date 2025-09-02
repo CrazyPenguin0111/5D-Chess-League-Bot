@@ -1162,10 +1162,29 @@ async def show_pairings(ctx, *, args: str = None):
         p1, p2 = r["player1_id"], r["player2_id"]
         res1 = f"{r['result1']:.1f}" if r["result1"] is not None else "Pending"
         res2 = f"{r['result2']:.1f}" if r["result2"] is not None else "Pending"
+
+        if res1 == "1.0":
+            win1 = names[p1]
+        elif res1 == "0.0":
+            win1 = names[p2]
+        elif res1 == "0.5":
+            win1 = "draw"
+        else:
+            win1 = res1
+
+        if res2 == "1.0":
+            win2 = names[p1]
+        elif res2 == "0.0":
+            win2 = names[p2]
+        elif res2 == "0.5":
+            win2 = "draw"
+        else:
+            win2 = res2
+
         entry = (
             f"**Match {i}**\n"
             f"⚔ {names[p1]} vs {names[p2]}\n"
-            f"• Game 1: {res1.ljust(7)} • Game 2: {res2}\n\n"
+            f"• Game 1: {win1.ljust()} • Game 2: {win2}\n\n"
         )
         if len(desc) + len(entry) > MAX_CHARS:
             pages.append(desc)
