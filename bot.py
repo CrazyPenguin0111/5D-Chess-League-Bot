@@ -1,8 +1,34 @@
+import asyncio
+from datetime import datetime
 import discord
 from discord.ext import commands
-import sqlite3, math, csv, os, shlex
-from constants import ROLES_CONFIG_FILE, SQLITEFILE
-from cDatabase import *
+import math, csv, os, shlex
+from constants import INITIAL_ELO, ROLES_CONFIG_FILE, SQLITEFILE
+from database import (
+    activate_season,
+    bundle_leaderboard,
+    clean_old_pending_matches,
+    find_pairings_in_db,
+    find_player_group,
+    add_and_resolve_report,
+    setup_future_season,
+    delete_pending_rep,
+    find_unsigned_players,
+    generate_pairings,
+    get_group_ranking,
+    get_latest_season,
+    get_pending_rep,
+    get_player_data,
+    find_signed_players,
+    get_specific_pairing,
+    punish_player,
+    register_new_player,
+    sign_up_player,
+    update_missed_seasons,
+    update_player_stats,
+)
+from database_initialiser import init_db
+from logic import calculate_match_stats, get_role_ranges
 
 
 def load_config():
@@ -46,24 +72,6 @@ bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
 init_db()
 
 
-def get_expected_score(a, b):
-    return 1 / (1 + math.pow(10, (b - a) / 400))
-
-
-def update_elo(winner_elo, loser_elo, draw=False):
-    if draw:
-        expected_winner = get_expected_score(winner_elo, loser_elo)
-        expected_loser = get_expected_score(loser_elo, winner_elo)
-        new_winner_elo = winner_elo + 25 * (0.5 - expected_winner)
-        new_loser_elo = loser_elo + 25 * (0.5 - expected_loser)
-        return new_winner_elo, new_loser_elo
-    else:
-        expected = get_expected_score(winner_elo, loser_elo)
-        new_winner_elo = winner_elo + 25 * (1 - expected)
-        new_loser_elo = loser_elo - 25 * (1 - expected)
-        return new_winner_elo, new_loser_elo
-
-
 @bot.command(name="update_roles")
 @commands.has_permissions(manage_roles=True)
 async def update_player_roles(ctx):
@@ -77,50 +85,9 @@ async def update_player_roles(ctx):
         if not os.path.exists(ROLES_CONFIG_FILE):
             raise FileNotFoundError(f"'{ROLES_CONFIG_FILE}' not found in bot directory")
 
-        role_ranges = []
-        with open(ROLES_CONFIG_FILE, mode="r") as csvfile:
-            reader = csv.DictReader(csvfile)
-            if (
-                not reader.fieldnames
-                or "role" not in reader.fieldnames
-                or "min elo" not in reader.fieldnames
-                or "max elo" not in reader.fieldnames
-            ):
-                raise ValueError(
-                    "CSV file must have headers: 'role', 'min elo', 'max elo'"
-                )
+        role_ranges = get_role_ranges()
 
-            for row in reader:
-                if (
-                    not row.get("role")
-                    or not row.get("min elo")
-                    or not row.get("max elo")
-                ):
-                    continue
-
-                try:
-                    role_ranges.append(
-                        {
-                            "name": row["role"].strip(),
-                            "min": int(row["min elo"]),
-                            "max": int(row["max elo"]),
-                        }
-                    )
-                except ValueError:
-                    raise ValueError(f"Invalid ELO values in row: {row}")
-
-        if not role_ranges:
-            raise ValueError("No valid role ranges found in the configuration file")
-
-        role_ranges.sort(key=lambda x: x["min"], reverse=True)
-
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
-        c.execute("SELECT id, elo FROM players WHERE signed_up=1")
-
-        players = c.fetchall()
-        c.execute("UPDATE players SET seasons_missed = 0 WHERE signed_up = 1")
-        conn.close()
+        players = find_signed_players()
 
         if not players:
             await ctx.send("No signed up players found!")
@@ -179,16 +146,8 @@ async def update_player_roles(ctx):
 
         await progress_msg.edit(content=f"Updating Roles ... 100%")
 
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
-        c.execute("SELECT id, elo, seasons_missed FROM players WHERE signed_up=0")
-
-        n_players = c.fetchall()
-        c.execute(
-            "UPDATE players SET seasons_missed = seasons_missed + 1 WHERE signed_up = 0"
-        )
-        conn.close()
-
+        n_players = find_unsigned_players()
+        update_missed_seasons()
         for i, (player_id, elo, missed_seasons) in enumerate(n_players):
             try:
 
@@ -196,15 +155,7 @@ async def update_player_roles(ctx):
                 if not member:
                     continue
 
-                if missed_seasons > 1:
-                    if elo - 1380 > 10:
-                        elo -= 10
-                    else:
-                        elo = 1380
-
-                    c.execute(
-                        "UPDATE players SET elo = ? WHERE id = ?", (elo, player_id)
-                    )
+                punish_player(player_id, elo, missed_seasons)
 
                 roles_to_remove = []
                 for role_range in role_ranges:
@@ -270,11 +221,7 @@ async def register_player(ctx):
         await ctx.send(f"{ctx.author.mention}, you're already registered!")
         return
 
-    conn = sqlite3.connect(SQLITEFILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO players (id, elo) VALUES (?, ?)", (player_id, INITIAL_ELO))
-    conn.commit()
-    conn.close()
+    register_new_player(player_id)
 
     await ctx.send(
         f"🎉 {ctx.author.mention} has been registered with an initial ELO of {INITIAL_ELO}!"
@@ -300,175 +247,75 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
         await ctx.send("❌ You can't report a match with yourself!")
         return
 
-    reporter_data = get_player_data(ctx.author.id)
+    author_id = ctx.author.id
+    reporter_data = get_player_data(author_id)
     opponent_data = get_player_data(opponent.id)
     if not reporter_data or not opponent_data:
         await ctx.send("❌ Both players must be registered!")
         return
-
-    conn = sqlite3.connect(SQLITEFILE)
     try:
-        c = conn.cursor()
-        season_active = c.execute(
-            "SELECT active FROM seasons ORDER BY season_number DESC LIMIT 1"
-        ).fetchone()[0]
-
-        if season_active:
-
-            pairing = get_specific_pairing(ctx, opponent, c)
-            print(pairing)
-            if not pairing:
+        game1, game2, p1_id, p2_id, new_rep = add_and_resolve_report(
+            author_id, opponent.id, game_number, result
+        )
+    except Exception as e:
+        match e.args[0]:
+            case 1:
                 await ctx.send("❌ No valid season pairing found!")
                 return
-
-            pairing_id, p1_id, p2_id, _, _ = pairing
-
-            is_player1 = ctx.author.id == p1_id
-            result_value = (
-                1.0
-                if (result == "w" and is_player1) or (result == "l" and not is_player1)
-                else 0.0
-            )
-            if result == "d":
-                result_value = 0.5
-
-            c.execute(
-                """SELECT reporter_id, result
-                         FROM pending_reps
-                         WHERE pairing_id = ?
-                         AND game_number = ?
-                """,
-                (pairing_id, game_number),
-            )
-            existing_rep = c.fetchone()
-
-            c.execute(
-                """SELECT result1, result2
-                   FROM pairings
-                   WHERE (player1_id = ? AND player2_id = ?)
-                     AND season_number = (SELECT season_number FROM seasons WHERE active = 1)
-                """,
-                (p1_id, p2_id),
-            )
-
-            game1, game2 = c.fetchone()
-            if game_number == 1:
-                if game1 is not None:
-                    await ctx.send(
-                        "❌ Results have already been reported cannot report result again."
-                    )
-                    return
-
-            if game_number == 2:
-                if game2 is not None:
-                    await ctx.send(
-                        "❌ Results have already been reported cannot report result again."
-                    )
-                    return
-
-            if existing_rep:
-
-                if existing_rep[0] == opponent.id:
-                    expected_result = {"w": "l", "l": "w", "d": "d"}[existing_rep[1]]
-                    if result != expected_result:
-                        await ctx.send(
-                            "❌ Results don't match! Please report the opposite result."
-                        )
-                        return
-                    else:
-                        await ctx.send("✅ Game Successfully reported!.")
-
-                    c.execute(
-                        f"""UPDATE pairings 
-                                 SET result{game_number}=?
-                                 WHERE id=?""",
-                        (result_value, pairing_id),
-                    )
-                    conn.commit()
-                    update_match_history(
-                        pairing_id,
-                        game_number,
-                        result_value,
-                    )
-                    c.execute(
-                        """SELECT result1, result2
-                                 FROM pairings
-                                 WHERE (player1_id = ? AND player2_id = ?)
-                                   AND season_number = (SELECT season_number FROM seasons WHERE active = 1)
-                        """,
-                        (p1_id, p2_id),
-                    )
-                    game1, game2 = c.fetchone()
-
-                    if game1 is not None and game2 is not None:
-                        p1_elo = get_player_data(p1_id)[1]
-                        p2_elo = get_player_data(p2_id)[1]
-
-                        if game1 == 0.5:
-                            g1_p1, g1_p2 = update_elo(p1_elo, p2_elo, draw=True)
-                        elif game1 == 1.0:
-                            g1_p1, g1_p2 = update_elo(p1_elo, p2_elo)
-                        else:
-                            g1_p2, g1_p1 = update_elo(p2_elo, p1_elo)
-
-                        if game2 == 0.5:
-                            g2_p1, g2_p2 = update_elo(g1_p1, g1_p2, draw=True)
-                        elif game2 == 1.0:
-                            g2_p1, g2_p2 = update_elo(g1_p1, g1_p2)
-                        else:
-                            g2_p2, g2_p1 = update_elo(g1_p2, g1_p1)
-
-                        p1_wins = sum(1 for r in [game1, game2] if (r == 1.0))
-                        p1_losses = (
-                            2 - p1_wins - sum(1 for r in [game1, game2] if r == 0.5)
-                        )
-                        p1_draws = sum(1 for r in [game1, game2] if r == 0.5)
-
-                        p2_wins = 2 - p1_wins - p1_draws
-                        p2_losses = p1_wins
-                        p2_draws = p1_draws
-
-                        update_player_stats(p1_id, g2_p1, p1_wins, p1_losses, p1_draws)
-                        update_player_stats(p2_id, g2_p2, p2_wins, p2_losses, p2_draws)
-
-                        await ctx.send(
-                            f"✅ Both games confirmed! Updated:\n"
-                            f"<@{p1_id}>: {p1_wins}W {p1_losses}L {p1_draws}D | ELO: {p1_elo:.0f}→{g2_p1:.0f}\n"
-                            f"<@{p2_id}>: {p2_wins}W {p2_losses}L {p2_draws}D | ELO: {p2_elo:.0f}→{g2_p2:.0f}"
-                        )
-
-                    c.execute(
-                        "DELETE FROM pending_reps WHERE pairing_id=?", (pairing_id,)
-                    )
-                    conn.commit()
-                else:
-                    await ctx.send(
-                        "❌ Already reported! Waiting for opponent's confirmation."
-                    )
-            else:
-
-                c.execute(
-                    """INSERT INTO pending_reps
-                                 (pairing_id, reporter_id, result, game_number)
-                             VALUES (?, ?, ?, ?)""",
-                    (pairing_id, ctx.author.id, result, game_number),
-                )
-                conn.commit()
+            case 2:
                 await ctx.send(
-                    f"⚠️ Reported game {game_number}! {opponent.mention} confirm with:\n"
-                    f"`$rep {'l' if result == 'w' else 'w' if result == 'l' else 'd'} "
-                    f"@{ctx.author.name} {game_number}`"
+                    "❌ Results have already been reported cannot report result again."
                 )
+                return
+            case 3:
+                await ctx.send(
+                    "❌ Results don't match! Please report the opposite result."
+                )
+                return
+            case 4:
+                await ctx.send(
+                    "❌ Already reported! Waiting for opponent's confirmation."
+                )
+                return
+    if new_rep:
+        await ctx.send(
+            f"⚠️ Reported game {game_number}! {opponent.mention} confirm with:\n"
+            f"`$rep {'l' if result == 'w' else 'w' if result == 'l' else 'd'} "
+            f"@{ctx.author.name} {game_number}`"
+        )
+        return
+    if game1 is not None and game2 is not None:
+        p1_elo = get_player_data(p1_id)[1]
+        p2_elo = get_player_data(p2_id)[1]
 
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        conn.close()
+        player1_new_stats, player2_new_stats = calculate_match_stats(
+            game1, game2, p1_elo, p2_elo
+        )
+
+        update_player_stats(
+            p1_id,
+            player1_new_stats["elo"],
+            player1_new_stats["wins"],
+            player1_new_stats["losses"],
+            player1_new_stats["draws"],
+        )
+        update_player_stats(
+            p2_id,
+            player2_new_stats["elo"],
+            player2_new_stats["wins"],
+            player2_new_stats["losses"],
+            player2_new_stats["draws"],
+        )
+
+        await ctx.send(
+            f"✅ Both games confirmed! Updated:\n"
+            f"<@{p1_id}>: {player1_new_stats["wins"]}W {player1_new_stats["losses"]}L {player1_new_stats["draws"]}D | ELO: {p1_elo:.0f}→{player1_new_stats["elo"]:.0f}\n"
+            f"<@{p2_id}>: {player2_new_stats["wins"]}W {player2_new_stats["losses"]}L {player2_new_stats["draws"]}D | ELO: {p2_elo:.0f}→{player2_new_stats["elo"]:.0f}"
+        )
 
 
 @bot.command(name="cancel")
 async def cancel_pending_match(ctx, result: str, opponent: discord.Member):
-    """Cancel your last pending match with the specified opponent"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -554,9 +401,6 @@ async def backup_db(ctx):
 
 @bot.command(name="leaderboard")
 async def show_leaderboard(ctx, *args):
-    """Show the top N players, optionally filtered by role, with your own rank highlighted."""
-
-    import aiosqlite
 
     allowed, error_msg = check_channel(ctx)
     if not allowed:
@@ -571,7 +415,6 @@ async def show_leaderboard(ctx, *args):
         else:
             role_name = (role_name + " " + arg).strip() if role_name else arg
 
-    # 2️⃣ resolve role & its member IDs
     role = None
     member_ids = None
     if role_name:
@@ -584,70 +427,9 @@ async def show_leaderboard(ctx, *args):
         if not member_ids:
             return await ctx.send(f"❌ No players have the '{role.name}' role!")
 
-    # 3️⃣ async DB: total count & your rank
-    async with aiosqlite.connect(SQLITEFILE) as conn:
-        conn.row_factory = aiosqlite.Row
-
-        # 3a. total players (for “of X” in footer)
-        if member_ids:
-            q_total = f"SELECT COUNT(*) as cnt FROM players WHERE id IN ({','.join('?'*len(member_ids))})"
-            cur = await conn.execute(q_total, member_ids)
-        else:
-            cur = await conn.execute("SELECT COUNT(*) as cnt FROM players")
-        row = await cur.fetchone(); await cur.close()
-        total_players = row["cnt"]
-
-        # 3b. find your own ELO & rank
-        cur = await conn.execute(
-            "SELECT elo, wins, losses, draws FROM players WHERE id=?",
-            (ctx.author.id,)
-        )
-        you = await cur.fetchone(); await cur.close()
-
-        user_rank = None
-        surrounding = []
-        if you:
-            your_elo = you["elo"]
-            # count how many have strictly higher ELO
-            if member_ids:
-                q_rank = (
-                    f"SELECT COUNT(*) as cnt FROM players WHERE elo>? "
-                    f"AND id IN ({','.join('?'*len(member_ids))})"
-                )
-                params = (your_elo, *member_ids)
-            else:
-                q_rank = "SELECT COUNT(*) as cnt FROM players WHERE elo>?"
-                params = (your_elo,)
-            cur = await conn.execute(q_rank, params)
-            user_rank = (await cur.fetchone())["cnt"] + 1
-            await cur.close()
-
-        # 3c. fetch leaderboard rows
-        rows = []
-        base_query = "SELECT id, elo, wins, losses, draws FROM players"
-        where = ""
-        params = ()
-        if member_ids:
-            where = f" WHERE id IN ({','.join('?'*len(member_ids))})"
-            params = tuple(member_ids)
-        order = " ORDER BY elo DESC"
-
-        if you and user_rank and user_rank > limit:
-            #  top N + your surrounding 3
-            top_q = base_query + where + order + " LIMIT ?"
-            cur = await conn.execute(top_q, params + (limit,))
-            top = await cur.fetchall(); await cur.close()
-
-            off = max(0, user_rank - 2)
-            surround_q = base_query + where + order + " LIMIT 3 OFFSET ?"
-            cur = await conn.execute(surround_q, params + (off,))
-            surrounding = await cur.fetchall(); await cur.close()
-            rows = top
-        else:
-            # user is in top N or not registered → just top N
-            top_q = base_query + where + order + " LIMIT ?"
-            cur = await conn.execute(top_q, params + (limit,))
-            rows = await cur.fetchall(); await cur.close()
+    total_players, you, user_rank, surrounding, rows = await bundle_leaderboard(
+        ctx.author.id, limit, member_ids
+    )
 
     if not rows and not surrounding:
         msg = "❌ No players found"
@@ -666,8 +448,7 @@ async def show_leaderboard(ctx, *args):
     missing = [uid for uid in all_ids if uid not in names]
     if missing:
         fetched = await asyncio.gather(
-            *(ctx.guild.fetch_member(uid) for uid in missing),
-            return_exceptions=True
+            *(ctx.guild.fetch_member(uid) for uid in missing), return_exceptions=True
         )
         for res in fetched:
             if isinstance(res, discord.Member):
@@ -693,8 +474,12 @@ async def show_leaderboard(ctx, *args):
             name += f" {role.mention}"
 
         games = w + l + d
-        rate = f"{(w/(w+l))*100:.1f}%" if (w+l)>0 else "—"
-        stats = f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})" if games else f"**{elo:.0f} ELO** | No games"
+        rate = f"{(w/(w+l))*100:.1f}%" if (w + l) > 0 else "—"
+        stats = (
+            f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})"
+            if games
+            else f"**{elo:.0f} ELO** | No games"
+        )
 
         embed.add_field(name=f"{idx}. {name}", value=stats, inline=False)
         displayed.add(idx)
@@ -702,7 +487,7 @@ async def show_leaderboard(ctx, *args):
     # Your surrounding (if any)
     if surrounding and you:
         embed.add_field(name="—", value="—", inline=False)
-        for offset, r in enumerate(surrounding, start=user_rank-1):
+        for offset, r in enumerate(surrounding, start=user_rank - 1):
             idx = offset
             if idx in displayed:
                 continue
@@ -713,8 +498,12 @@ async def show_leaderboard(ctx, *args):
                 name += f" {role.mention}"
 
             games = w + l + d
-            rate = f"{(w/(w+l))*100:.1f}%" if (w+l)>0 else "—"
-            stats = f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})" if games else f"**{elo:.0f} ELO** | No games"
+            rate = f"{(w/(w+l))*100:.1f}%" if (w + l) > 0 else "—"
+            stats = (
+                f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})"
+                if games
+                else f"**{elo:.0f} ELO** | No games"
+            )
 
             embed.add_field(name=f"{prefix}{idx}. {name}", value=stats, inline=False)
 
@@ -726,9 +515,9 @@ async def show_leaderboard(ctx, *args):
 
     await ctx.send(embed=embed)
 
+
 @bot.command(name="signup")
 async def signup_player(ctx):
-    """Sign up for the current season"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -738,56 +527,36 @@ async def signup_player(ctx):
     if not get_player_data(player_id):
         await ctx.send(f"You need to register first with `$register`!")
         return
-
-    conn = sqlite3.connect(SQLITEFILE)
-    c = conn.cursor()
-
-    c.execute("SELECT active FROM seasons ORDER BY season_number DESC LIMIT 1")
-    season_active = c.fetchone()[0]
+    (_, season_active) = get_latest_season()
 
     if not season_active:
-
-        c.execute("UPDATE players SET signed_up=1 WHERE id=?", (player_id,))
-        conn.commit()
+        sign_up_player(player_id)
         await ctx.send(f"✅ {ctx.author.mention} has signed up for the current season!")
     else:
         await ctx.send("❌ Season is already active")
-
-    conn.close()
 
 
 @bot.command(name="start_season")
 @commands.has_permissions(manage_roles=True)
 async def start_season(ctx):
-    """Start a new season (Admin only)"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
         return
 
     try:
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
 
-        c.execute(
-            "SELECT season_number FROM seasons ORDER BY season_number DESC LIMIT 1"
-        )
-        current_season = c.fetchone()[0]
+        (current_season, active) = get_latest_season()
 
-        c.execute("SELECT active FROM seasons WHERE season_number=?", (current_season,))
-        if c.fetchone()[0]:
+        if active:
             await ctx.send("❌ There's already an active season!")
-            conn.close()
             return
 
         await update_player_roles(ctx)
 
         await generate_pairings(ctx, current_season)
 
-        c.execute(
-            "UPDATE seasons SET active=1 WHERE season_number=?", (current_season,)
-        )
-        conn.commit()
+        activate_season(current_season)
 
         await ctx.send(
             f"✅ Season {current_season} has started! Players can no longer sign up"
@@ -795,58 +564,36 @@ async def start_season(ctx):
 
     except Exception as e:
         await ctx.send(f"❌ Error starting season: {e}")
-    finally:
-        conn.close()
 
 
 @bot.command(name="end_season")
 @commands.has_permissions(manage_roles=True)
 async def end_season(ctx):
-    """End the current season (Admin only)"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
         return
 
     try:
-        conn = sqlite3.connect(SQLITEFILE)
-        c = conn.cursor()
 
-        c.execute("SELECT season_number FROM seasons WHERE active=1")
-        result = c.fetchone()
+        (old_season, _) = get_latest_season()
 
-        if not result:
+        if not old_season:
             await ctx.send("❌ No active season to end!")
-            conn.close()
             return
 
-        current_season = result[0]
-
-        c.execute("UPDATE players SET signed_up=0")
-
-        new_season = current_season + 1
-        c.execute(
-            "INSERT INTO seasons (season_number, active) VALUES (?, 0)", (new_season,)
-        )
-
-        c.execute(
-            "UPDATE seasons SET active=0 WHERE season_number=?", (current_season,)
-        )
-        conn.commit()
-
+        new_season = old_season + 1
+        setup_future_season(old_season, new_season)
         await ctx.send(
-            f"✅ Season {current_season} has ended. Season {new_season} is ready to start!"
+            f"✅ Season {old_season} has ended. Season {new_season} is ready to start!"
         )
 
     except Exception as e:
         await ctx.send(f"❌ Error ending season: {e}")
-    finally:
-        conn.close()
 
 
 @bot.command(name="help")
 async def show_help(ctx):
-    """Show all available commands and how to use them"""
     allowed, error_msg = check_channel(ctx)
     if not allowed:
         await ctx.send(error_msg)
@@ -997,7 +744,7 @@ async def show_groupleaderboard(ctx, group="own", season="latest"):
         await ctx.send(error_msg)
         return
     if season == "latest":
-        season = get_latest_season()
+        (season, _active) = get_latest_season()
     if group == "own":
         group = find_player_group(ctx.author.id, season)
     if "procrastination" in group.lower() or "lazy" in group.lower():
@@ -1015,8 +762,9 @@ async def show_groupleaderboard(ctx, group="own", season="latest"):
         color = discord.Color.blue()
 
     embed = discord.Embed(
-        title="Rankings", description=f"Ranking of {group} in Season {season}",
-        color = color
+        title="Rankings",
+        description=f"Ranking of {group} in Season {season}",
+        color=color,
     )
     embed_str = ""
     for i, player in enumerate(leaderboard, 1):
@@ -1033,16 +781,12 @@ async def show_groupleaderboard(ctx, group="own", season="latest"):
         else:
             embed_str += f"{i}. {name}, Score: {player['points']}, {player['sb']}\n"
 
-    embed.add_field(name = "", value = embed_str)
+    embed.add_field(name="", value=embed_str)
     await ctx.send(embed=embed)
 
 
 @bot.command(name="pairings")
 async def show_pairings(ctx, *, args: str = None):
-
-    import aiosqlite
-    import asyncio
-    import shlex
 
     allowed, error_msg = check_channel(ctx)
     if not allowed:
@@ -1064,78 +808,31 @@ async def show_pairings(ctx, *, args: str = None):
         season = None
         group_name = None
 
-    async with aiosqlite.connect(SQLITEFILE) as conn:
-        conn.row_factory = aiosqlite.Row
-
-        # 3a. determine active season if none passed
-        if season is None:
-            cur = await conn.execute("SELECT season_number FROM seasons WHERE active=1")
-            row = await cur.fetchone(); await cur.close()
-            season = row["season_number"] if row else None
-            if season is None:
-                return await ctx.send("❌ No active season!")
-
-        # 3b. ensure season exists
-        cur = await conn.execute("SELECT 1 FROM seasons WHERE season_number=?", (season,))
-        if not await cur.fetchone():
-            await cur.close()
-            return await ctx.send(f"❌ Season {season} doesn't exist!")
-        await cur.close()
-
-        # 3c. find user’s group if none passed
-        if group_name is None:
-
-            player_id = ctx.author.id
-            cur = await conn.execute(
-                "SELECT group_name FROM pairings WHERE season_number=? AND (player1_id=? OR player2_id=?) LIMIT 1",
-                (season, player_id, player_id)
-            )
-            grp = await cur.fetchone(); await cur.close()
-            if not grp:
-                return await ctx.send("❌ You are not in any group for the current season!")
-            group_name = grp["group_name"]
-
-        # 3d. validate group_name spelling
-        if group_name:
-
-            if "procrastination" in group_name.lower() or "lazy" in group_name.lower():
-                group_name = "Pro League"
-
-            cur = await conn.execute(
-                "SELECT DISTINCT group_name FROM pairings WHERE season_number=?", (season,)
-            )
-            valid = [r["group_name"].lower() for r in await cur.fetchall()]
-            await cur.close()
-            if group_name.lower() not in valid:
-                sugg = [g for g in valid if group_name.lower() in g]
-                msg = f"❌ Group '{group_name}' not found in season {season}!"
-                if sugg:
-                    msg += f"\nDid you mean: {', '.join(sugg[:3])}?"
-                return await ctx.send(msg)
-
-        title = f"Pairings - Season {season}"
-        if group_name:
-            title += f", {group_name}"
-
-        # 3e. grab all pairings rows
-        sql = ("SELECT player1_id, player2_id, result1, result2 "
-               "FROM pairings WHERE season_number=?")
-        params = [season]
-        if group_name:
-            sql += " AND LOWER(group_name)=LOWER(?)"
-            params.append(group_name)
-        sql += " ORDER BY id"
-
-        cur = await conn.execute(sql, params)
-        pairings = await cur.fetchall()
-        await cur.close()
-
+    try:
+        pairings, season = find_pairings_in_db(ctx.player.id, season, group_name)
+    except Exception as e:
+        (errorcode,) = e.args
+        match errorcode:
+            case 1:
+                await ctx.send("❌ No active season!")
+                return
+            case 2:
+                await ctx.send(f"❌ Season {season} doesn't exist!")
+                return
+            case 3:
+                await ctx.send("❌ You are not in any group for the current season!")
+                return
+            case _:
+                await ctx.send(errorcode)
+                return
     if not pairings:
         suffix = f", Group {group_name}" if group_name else ""
-        return await ctx.send(f"❌ No pairings found for Season {season}{suffix}!")
+        await ctx.send(f"❌ No pairings found for Season {season}{suffix}!")
+        return
 
-    # 4️⃣ bulk‑resolve Discord names
-    ids = {row["player1_id"] for row in pairings} | {row["player2_id"] for row in pairings}
+    ids = {row["player1_id"] for row in pairings} | {
+        row["player2_id"] for row in pairings
+    }
     names = {}
     for uid in ids:
         m = ctx.guild.get_member(uid)
@@ -1144,18 +841,15 @@ async def show_pairings(ctx, *, args: str = None):
     missing = [uid for uid in ids if uid not in names]
     if missing:
         fetched = await asyncio.gather(
-            *(ctx.guild.fetch_member(uid) for uid in missing),
-            return_exceptions=True
+            *(ctx.guild.fetch_member(uid) for uid in missing), return_exceptions=True
         )
         for res in fetched:
             if isinstance(res, discord.Member):
                 names[res.id] = res.display_name[:20]
             else:
-                # fallback on error
                 bad_id = getattr(res, "user_id", None) or None
                 names[bad_id] = f"Player {bad_id}"
 
-    # 5️⃣ build paged embeds
     MAX_CHARS = 3800
     pages, desc = [], ""
     for i, r in enumerate(pairings, start=1):
@@ -1193,13 +887,12 @@ async def show_pairings(ctx, *, args: str = None):
             desc += entry
     if desc:
         pages.append(desc)
-
+    title = f"Pairings - Season {season}"
     embeds = [
         discord.Embed(title=f"{title} — Page {idx+1}", description=page, color=0x00FF00)
         for idx, page in enumerate(pages)
     ]
 
-    # 6️⃣ send
     if len(embeds) == 1:
         await ctx.send(embed=embeds[0])
     else:
