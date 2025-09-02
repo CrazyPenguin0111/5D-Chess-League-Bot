@@ -1184,7 +1184,7 @@ async def show_pairings(ctx, *, args: str = None):
         entry = (
             f"**Match {i}**\n"
             f"⚔ {names[p1]} vs {names[p2]}\n"
-            f"• Game 1: {win1.ljust(len(win1))} • Game 2: {win2}\n\n"
+            f"• Game 1: {win1.ljust(len(win1))}     • Game 2: {win2}\n\n"
         )
         if len(desc) + len(entry) > MAX_CHARS:
             pages.append(desc)
