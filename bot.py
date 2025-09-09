@@ -438,7 +438,8 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
                         )
 
                     c.execute(
-                        "DELETE FROM pending_reps WHERE pairing_id=?", (pairing_id,)
+                        "DELETE FROM pending_reps WHERE pairing_id=? AND game_number=?",
+                        (pairing_id, game_number),
                     )
                     conn.commit()
                 else:
