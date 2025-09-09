@@ -670,12 +670,13 @@ async def show_leaderboard(ctx, *args):
             *(ctx.guild.fetch_member(uid) for uid in missing),
             return_exceptions=True
         )
-        for res in fetched:
+        # ensure we map results to the original IDs by index
+        for idx, res in enumerate(fetched):
+            uid = missing[idx]
             if isinstance(res, discord.Member):
-                names[res.id] = res.display_name[:20]
+                names[uid] = res.display_name[:20]
             else:
-                bad = getattr(res, "user_id", None)
-                names[bad] = f"Player {bad}"
+                names[uid] = f"Player {uid}"
 
     # 5️⃣ build embed
     title = f"🏆 Top {limit} Leaderboard"
@@ -690,11 +691,9 @@ async def show_leaderboard(ctx, *args):
     for idx, r in enumerate(rows, start=1):
         pid, elo, w, l, d = r["id"], r["elo"], r["wins"], r["losses"], r["draws"]
         name = names.get(pid, f"Player {pid}")
-        if role and role in ctx.guild.get_member(pid).roles:
-            name += f" {role.mention}"
 
         games = w + l + d
-        rate = f"{(w/(w+l))*100:.1f}%" if (w+l)>0 else "—"
+        rate = f"{(w/games)*100:.1f}%" if (w+l)>0 else "—"
         stats = f"**{elo:.0f} ELO** | {w}W {l}L {d}D ({rate})" if games else f"**{elo:.0f} ELO** | No games"
 
         embed.add_field(name=f"{idx}. {name}", value=stats, inline=False)
@@ -702,7 +701,7 @@ async def show_leaderboard(ctx, *args):
 
     # Your surrounding (if any)
     if surrounding and you:
-        embed.add_field(name="—", value="—", inline=False)
+        embed.add_field(name="", value="—", inline=False)
         for offset, r in enumerate(surrounding, start=user_rank-1):
             idx = offset
             if idx in displayed:
@@ -1148,13 +1147,14 @@ async def show_pairings(ctx, *, args: str = None):
             *(ctx.guild.fetch_member(uid) for uid in missing),
             return_exceptions=True
         )
-        for res in fetched:
+        # map each result back to its uid reliably
+        for idx, res in enumerate(fetched):
+            uid = missing[idx]
             if isinstance(res, discord.Member):
-                names[res.id] = res.display_name[:20]
+                names[uid] = res.display_name[:20]
             else:
-                # fallback on error
-                bad_id = getattr(res, "user_id", None) or None
-                names[bad_id] = f"Player {bad_id}"
+                # fallback on error: still provide a display name for this uid
+                names[uid] = f"Player {uid}"
 
     # 5️⃣ build paged embeds
     MAX_CHARS = 3800
