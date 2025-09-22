@@ -822,6 +822,13 @@ async def end_season(ctx):
 
         current_season = result[0]
 
+        # Apply penalties for any pending games before closing the season
+        penalties = apply_pending_match_penalties()
+        if penalties:
+            await ctx.send(f"Applied pending match penalties to {len(penalties)} players.")
+        else:
+            await ctx.send("No pending match penalties to apply.")
+
         c.execute("UPDATE players SET signed_up=0")
 
         new_season = current_season + 1
@@ -1223,6 +1230,61 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
         return
     print(f"Error in command {ctx.command}: {error}")
+
+
+def apply_pending_match_penalties():
+    """
+    Deduct 10 Elo per participant for each pending game found in the 'pairings' table.
+    A 'pending game' is a game where result1 or result2 is NULL.
+    Each NULL result counts as one pending game and penalizes BOTH participants by 10 Elo.
+    Returns a dict {player_id: total_penalty_applied}.
+    """
+    import sqlite3
+    from constants import SQLITEFILE
+
+    conn = sqlite3.connect(SQLITEFILE)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    # Pull all pairings that have at least one pending game
+    cur.execute(
+        """
+        SELECT id, player1_id, player2_id, result1, result2
+        FROM pairings
+        WHERE result1 IS NULL OR result2 IS NULL
+        """
+    )
+    rows = cur.fetchall()
+
+    # Accumulate penalties per player
+    penalties = {}  # player_id -> total penalty
+    for row in rows:
+        pending_games = (1 if row["result1"] is None else 0) + (1 if row["result2"] is None else 0)
+        if pending_games == 0:
+            continue
+
+        penalty = 10 * pending_games  # 10 Elo per pending game
+        for pid in (row["player1_id"], row["player2_id"]):
+            if pid is None:
+                continue
+            penalties[pid] = penalties.get(pid, 0) + penalty
+
+    # Apply penalties and log elo_history entries
+    try:
+        for pid, total_penalty in penalties.items():
+            cur.execute("UPDATE players SET elo = elo - ? WHERE id = ?", (total_penalty, pid))
+            cur.execute(
+                "INSERT INTO elo_history (player_id, elo_change) VALUES (?, ?)",
+                (pid, -total_penalty),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return penalties
 
 
 @bot.event
