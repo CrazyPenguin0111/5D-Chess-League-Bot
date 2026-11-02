@@ -1,9 +1,17 @@
 import discord
-from discord.ext import commands
+from discord import permissions
+from discord_slash import ShlashCommand
+from discord_slash.utils.manage_commands import create_option
 import sqlite3, math, csv, os, shlex
 from constants import ROLES_CONFIG_FILE, SQLITEFILE
 from cDatabase import *
 
+guild_ids = []#todo put in server id
+intents = discord.Intents.all()
+bot = discord.Client(intents=discord.Intents.none())
+shlash = ShlashCommand(bot, sync_commands=True)
+
+init_db()
 
 def load_config():
     config = {}
@@ -39,11 +47,6 @@ except Exception as e:
     exit(1)
 
 
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
-
-
-init_db()
 
 
 def get_expected_score(a, b):
@@ -64,8 +67,8 @@ def update_elo(winner_elo, loser_elo, draw=False):
         return new_winner_elo, new_loser_elo
 
 
-@bot.command(name="update_roles")
-@commands.has_permissions(manage_roles=True)
+@shlash.shlash(name="update_roles", guild_ids=guild_ids,
+               permissions=discord.permissions.Permissions.all())
 async def update_player_roles(ctx):
     allowed, error_msg = check_channel(ctx)
     if not allowed:
@@ -258,7 +261,7 @@ def check_channel(ctx):
     return True, None
 
 
-@bot.command(name="register")
+@shlash.shlash(guild_ids=guild_ids,name="register")
 async def register_player(ctx):
     allowed, error_msg = check_channel(ctx)
     if not allowed:
@@ -281,7 +284,27 @@ async def register_player(ctx):
     )
 
 
-@bot.command(name="rep")
+@shlash(name="rep", options=[
+    create_option(name= "result",
+     description= "the result",
+     choices= ["w", "l", "d"],
+     required= True,
+     type=3
+                  ),
+    create_option(
+        name= "opponent",
+        description= "your opponent",
+        type= 6,
+        required= True
+),
+create_option(
+        name= "game number",
+        description="the game of the match reported",
+        type= 4,
+        required= True,
+        choices= [1,2]
+)
+], guild_ids=guild_ids)
 async def report_match(ctx, result: str, opponent: discord.Member, game_number: int):
     allowed, error_msg = check_channel(ctx)
     if game_number not in [1, 2]:
@@ -467,7 +490,21 @@ async def report_match(ctx, result: str, opponent: discord.Member, game_number: 
         conn.close()
 
 
-@bot.command(name="cancel")
+@shlash.shlash(name="cancel", options=[
+    create_option(
+        name="result",
+        description="result to cancel",
+        choices= ["w", "l", "d"],
+        type= 3,
+        required= True
+    ),
+    create_option(
+        name="opponent",
+        description= "opponents tag",
+        type= 6,
+        required= True
+    )
+],guild_ids=guild_ids)
 async def cancel_pending_match(ctx, result: str, opponent: discord.Member):
     """Cancel your last pending match with the specified opponent"""
     allowed, error_msg = check_channel(ctx)
@@ -505,7 +542,12 @@ async def cancel_pending_match(ctx, result: str, opponent: discord.Member):
     )
 
 
-@bot.command(name="stats")
+@shlash.shlash(name="stats", options=[create_option(
+    name= "player",
+    description="player to pull stats from",
+    type= 6,
+    required= False
+)])
 async def show_stats(ctx, player: discord.Member = None):
     allowed, error_msg = check_channel(ctx)
     if not allowed:
@@ -539,9 +581,7 @@ async def show_stats(ctx, player: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-
-@bot.command("backup")
-@commands.has_permissions(manage_roles=True)
+"""
 async def backup_db(ctx):
     if BACKUP_CHANNEL_ID is None:
         await ctx.send("❌ Backup channel isn't setuped yet")
@@ -552,8 +592,9 @@ async def backup_db(ctx):
         file=discord.File(SQLITEFILE),
     )
 
+"""
 
-@bot.command(name="leaderboard")
+@shlash.shlash(name="leaderboard")
 async def show_leaderboard(ctx, *args):
     """Show the top N players, optionally filtered by role, with your own rank highlighted."""
 
@@ -726,7 +767,7 @@ async def show_leaderboard(ctx, *args):
 
     await ctx.send(embed=embed)
 
-@bot.command(name="signup")
+@shlash.shlash(name="signup")
 async def signup_player(ctx):
     """Sign up for the current season"""
     allowed, error_msg = check_channel(ctx)
@@ -756,8 +797,7 @@ async def signup_player(ctx):
     conn.close()
 
 
-@bot.command(name="start_season")
-@commands.has_permissions(manage_roles=True)
+@shlash.shlash(name="start_season", permissions=discord.permissions.Permissions.all())
 async def start_season(ctx):
     """Start a new season (Admin only)"""
     allowed, error_msg = check_channel(ctx)
@@ -799,8 +839,7 @@ async def start_season(ctx):
         conn.close()
 
 
-@bot.command(name="end_season")
-@commands.has_permissions(manage_roles=True)
+@shlash.shlash(name="end_season", permissions=discord.permissions.Permissions.all())
 async def end_season(ctx):
     """End the current season (Admin only)"""
     allowed, error_msg = check_channel(ctx)
@@ -851,7 +890,7 @@ async def end_season(ctx):
         conn.close()
 
 
-@bot.command(name="help")
+@shlash.shlash(name="help")
 async def show_help(ctx):
     """Show all available commands and how to use them"""
     allowed, error_msg = check_channel(ctx)
@@ -1296,6 +1335,7 @@ async def on_message(message):
 
 
 try:
+
     bot.run(BOT_TOKEN)
 except discord.LoginError:
     print("Invalid bot token in config.csv. Please check your token.")
